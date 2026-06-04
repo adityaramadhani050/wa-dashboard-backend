@@ -50,9 +50,7 @@ export function resolveJidForSend(storedPhone) {
     console.log(`[JID] Resolved LID ${storedPhone} → ${realPhone}`);
     return `${realPhone}@s.whatsapp.net`;
   }
-  if (/^\d{10,13}$/.test(storedPhone)) {
-    return `${storedPhone}@s.whatsapp.net`;
-  }
+  if (/^\d{10,13}$/.test(storedPhone)) return `${storedPhone}@s.whatsapp.net`;
   console.log(`[JID] Unresolved phone ${storedPhone}, trying @lid`);
   return `${storedPhone}@lid`;
 }
@@ -61,6 +59,25 @@ function resolvePhone(jid) {
   const raw = jid.split('@')[0];
   if (!jid.endsWith('@lid')) return raw;
   return lidToPhone.get(raw) || raw;
+}
+
+// Extract text body from any message type
+function extractBody(message) {
+  if (!message) return null;
+  return (
+    message.conversation ||
+    message.extendedTextMessage?.text ||
+    message.imageMessage?.caption ||
+    message.videoMessage?.caption ||
+    message.documentMessage?.caption ||
+    message.documentWithCaptionMessage?.message?.documentMessage?.caption ||
+    message.buttonsResponseMessage?.selectedDisplayText ||
+    message.listResponseMessage?.title ||
+    message.templateButtonReplyMessage?.selectedDisplayText ||
+    message.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson ||
+    message.reactionMessage?.text ||
+    null
+  );
 }
 
 async function upsertContact(phone, pushName) {
@@ -152,6 +169,20 @@ export async function connectToWhatsApp() {
     },
     printQRInTerminal: true,
     syncFullHistory: false,
+    // Required: lets Baileys re-encrypt messages on retry requests.
+    // Without this, recipients see "Waiting for this message..."
+    getMessage: async (key) => {
+      try {
+        if (!key.id) return undefined;
+        const { data } = await supabase
+          .from('messages')
+          .select('body')
+          .eq('wa_message_id', key.id)
+          .maybeSingle();
+        if (data?.body) return { conversation: data.body };
+      } catch {}
+      return { conversation: 'message unavailable' };
+    },
   });
 
   sock.ev.on('creds.update', saveCreds);
@@ -165,9 +196,8 @@ export async function connectToWhatsApp() {
         lidToPhone.set(lid, phone);
       }
       if (contact.id.endsWith('@lid') && contact.notify) {
-        const lid = phone;
         const realPhone = contact.notify.replace(/\D/g, '');
-        if (realPhone) lidToPhone.set(lid, realPhone);
+        if (realPhone) lidToPhone.set(phone, realPhone);
       }
     }
     console.log(`[Contacts] LID map updated, ${lidToPhone.size} entries`);
@@ -220,6 +250,13 @@ export async function connectToWhatsApp() {
       try {
         if (!msg.message) continue;
 
+        // Skip protocol/reaction/poll messages silently
+        const msgKeys = Object.keys(msg.message);
+        const isProtocol = msgKeys.every(k =>
+          ['messageContextInfo', 'protocolMessage', 'senderKeyDistributionMessage', 'reactionMessage'].includes(k)
+        );
+        if (isProtocol) continue;
+
         const fromMe = msg.key.fromMe;
         const jid = msg.key.remoteJid;
         if (jid.endsWith('@g.us')) continue;
@@ -227,13 +264,7 @@ export async function connectToWhatsApp() {
         const phone = resolvePhone(jid);
         const contactName = fromMe ? null : (msg.pushName || null);
 
-        const body =
-          msg.message?.conversation ||
-          msg.message?.extendedTextMessage?.text ||
-          msg.message?.imageMessage?.caption ||
-          msg.message?.videoMessage?.caption ||
-          '[media]';
-
+        const body = extractBody(msg.message) || '[media]';
         const timestamp = msg.messageTimestamp;
         const waMessageId = msg.key.id;
 
@@ -266,7 +297,7 @@ export async function connectToWhatsApp() {
     }
   });
 
-  // Track delivery receipts for sent messages
+  // Track delivery receipts for outgoing messages
   sock.ev.on('messages.update', async (updates) => {
     for (const { key, update } of updates) {
       if (!key.fromMe || !update.status) continue;
@@ -280,7 +311,7 @@ export async function connectToWhatsApp() {
           .update({ status })
           .eq('wa_message_id', key.id);
 
-        console.log(`[Receipt] msg=${key.id} status=${status}`);
+        console.log(`[Receipt] msg=${key.id} status=${status}(${update.status})`);
       } catch (err) {
         console.warn('[Receipt] Update error:', err.message);
       }
