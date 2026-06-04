@@ -8,6 +8,7 @@ import conversationsRouter from "./routes/conversations.js";
 import statsRouter from "./routes/stats.js";
 import messagesRouter from "./routes/messages.js";
 import agentsRouter from "./routes/agents.js";
+import authRouter from "./routes/auth.js";
 
 const PORT = process.env.PORT || 3000;
 const app = express();
@@ -37,11 +38,12 @@ app.use(express.json());
 app.get("/health", (req, res) => {
   res.json({
     status: "ok",
-    wa_connected: false,
+    wa_connected: getIsConnected(),
     timestamp: new Date().toISOString(),
   });
 });
 
+app.use("/api/auth", authRouter);
 app.use("/api/conversations", conversationsRouter);
 app.use("/api/stats", statsRouter);
 app.use("/api/messages", messagesRouter);
@@ -59,7 +61,6 @@ app.post("/api/wa/reset", async (req, res) => {
 io.on("connection", (socket) => {
   console.log("Dashboard client connected:", socket.id);
 
-  const sock = getSock();
   socket.emit("wa_status", { connected: getIsConnected() });
 
   socket.on("disconnect", () => {

@@ -6,7 +6,9 @@ const router = Router();
 
 router.get('/', async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const { agent_id } = req.query;
+
+    let query = supabase
       .from('conversations')
       .select(`
         *,
@@ -14,6 +16,12 @@ router.get('/', async (req, res) => {
         agents:assigned_to (id, name, email, role)
       `)
       .order('updated_at', { ascending: false });
+
+    if (agent_id) {
+      query = query.eq('assigned_to', agent_id);
+    }
+
+    const { data, error } = await query;
 
     if (error) throw error;
     const enriched = await Promise.all(
