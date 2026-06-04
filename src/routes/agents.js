@@ -8,6 +8,7 @@ router.get('/', async (req, res) => {
     const { data, error } = await supabase
       .from('agents')
       .select('id, name, email, role')
+      .eq('role', 'agent')
       .order('name');
 
     if (error) throw error;
