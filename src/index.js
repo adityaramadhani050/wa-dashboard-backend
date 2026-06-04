@@ -57,11 +57,8 @@ io.on("connection", (socket) => {
   });
 });
 
-httpServer.listen(PORT, "localhost", async () => {
-  console.log(`Server running on port ${PORT}`);
-  try {
-    await connectToWhatsApp();
-  } catch (err) {
-    console.error("Failed to start WhatsApp connection:", err);
-  }
-});
+httpServer.listen(PORT, '0.0.0.0', async () => {
+  console.log(`Server running on ${PORT}`)
+  setSocketIO(io)
+  await connectToWhatsApp()
+})
