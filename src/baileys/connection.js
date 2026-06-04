@@ -3,8 +3,6 @@ import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
-  makeInMemoryStore,
-  getContentType,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import { supabase } from '../db/supabase.js';
@@ -18,8 +16,8 @@ const AUTH_FOLDER = path.join(__dirname, '../../.wa_auth');
 let sock = null;
 let ioInstance = null;
 
-// In-memory store to resolve LID → real phone mappings
-const store = makeInMemoryStore({});
+// LID → real phone mapping, populated from contacts.upsert event
+const lidToPhone = new Map();
 
 export function setIO(io) {
   ioInstance = io;
@@ -29,20 +27,11 @@ export function getSock() {
   return sock;
 }
 
-// Resolve the best phone number from a JID
-// @lid JIDs are WhatsApp internal IDs, try to resolve to real phone via store
-function resolvePhone(jid, storeContacts = {}) {
+// Resolve real phone from JID — handles both @s.whatsapp.net and @lid
+function resolvePhone(jid) {
   const raw = jid.split('@')[0];
   if (!jid.endsWith('@lid')) return raw;
-
-  // Try to find real number from store contacts
-  const contact = storeContacts[jid];
-  if (contact?.notify) return contact.notify.replace(/\D/g, '');
-  if (contact?.verifiedName) return contact.verifiedName;
-  if (contact?.id) return contact.id.split('@')[0];
-
-  // Fallback: use LID number as-is (not ideal but better than crashing)
-  return raw;
+  return lidToPhone.get(raw) || raw;
 }
 
 async function upsertContact(phone, pushName) {
@@ -142,10 +131,41 @@ export async function connectToWhatsApp() {
     syncFullHistory: false,
   });
 
-  // Bind store to socket events for LID resolution
-  store.bind(sock.ev);
-
   sock.ev.on('creds.update', saveCreds);
+
+  // Build LID → real phone mapping from contact sync
+  // contacts.upsert fires on initial sync and when new contacts appear
+  // Each contact with a real JID (@s.whatsapp.net) may also have a .lid field
+  sock.ev.on('contacts.upsert', (contacts) => {
+    for (const contact of contacts) {
+      if (!contact.id) continue;
+      const phone = contact.id.split('@')[0];
+
+      // Map LID → real phone if contact has both
+      if (contact.lid) {
+        const lid = contact.lid.split('@')[0];
+        lidToPhone.set(lid, phone);
+      }
+
+      // Also handle reverse: if this contact IS a LID entry with a known number
+      if (contact.id.endsWith('@lid') && contact.notify) {
+        const lid = phone;
+        // notify may contain the real number in some Baileys versions
+        const realPhone = contact.notify.replace(/\D/g, '');
+        if (realPhone) lidToPhone.set(lid, realPhone);
+      }
+    }
+    console.log(`[Contacts] LID map updated, ${lidToPhone.size} entries`);
+  });
+
+  sock.ev.on('contacts.update', (updates) => {
+    for (const update of updates) {
+      if (!update.id || !update.lid) continue;
+      const phone = update.id.split('@')[0];
+      const lid = update.lid.split('@')[0];
+      lidToPhone.set(lid, phone);
+    }
+  });
 
   sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
     if (qr) {
@@ -189,11 +209,10 @@ export async function connectToWhatsApp() {
 
         if (jid.endsWith('@g.us')) continue;
 
-        // Resolve real phone number (handles both @s.whatsapp.net and @lid)
-        const phone = resolvePhone(jid, store.contacts || {});
+        const phone = resolvePhone(jid);
 
-        // Only use pushName from received messages — for sent messages,
-        // pushName is your own account name, not the contact's name
+        // Only use pushName from received messages
+        // For sent messages, pushName is your own WA account name
         const contactName = fromMe ? null : (msg.pushName || null);
 
         const body =
