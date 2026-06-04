@@ -3,27 +3,45 @@ import { supabase } from '../db/supabase.js';
 
 const router = Router();
 
+// Daily message stats from last 14 days — computed from messages table
 router.get('/daily', async (req, res) => {
   try {
-    const { from, to } = req.query;
+    const since = new Date();
+    since.setDate(since.getDate() - 13);
+    since.setHours(0, 0, 0, 0);
 
-    let query = supabase
-      .from('daily_stats')
-      .select('*')
-      .order('date', { ascending: false });
+    const { data: messages, error } = await supabase
+      .from('messages')
+      .select('timestamp, from_me')
+      .gte('timestamp', since.toISOString());
 
-    if (from) query = query.gte('date', from);
-    if (to) query = query.lte('date', to);
-
-    const { data, error } = await query;
     if (error) throw error;
-    res.json(data);
+
+    // Build date map for last 14 days (fill gaps with zeros)
+    const byDate = {};
+    for (let i = 0; i < 14; i++) {
+      const d = new Date(since);
+      d.setDate(d.getDate() + i);
+      const key = d.toISOString().split('T')[0];
+      byDate[key] = { date: key, messages: 0, incoming: 0, outgoing: 0 };
+    }
+
+    for (const msg of messages) {
+      const key = msg.timestamp.split('T')[0];
+      if (!byDate[key]) continue;
+      byDate[key].messages++;
+      if (msg.from_me) byDate[key].outgoing++;
+      else byDate[key].incoming++;
+    }
+
+    res.json(Object.values(byDate));
   } catch (err) {
     console.error('GET /stats/daily error:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
+// Agent performance stats
 router.get('/agents', async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -39,11 +57,13 @@ router.get('/agents', async (req, res) => {
     const agentMap = {};
     for (const conv of data) {
       const agentId = conv.assigned_to;
-      if (!agentId) continue;
+      if (!agentId || !conv.agents) continue;
 
       if (!agentMap[agentId]) {
         agentMap[agentId] = {
-          agent: conv.agents,
+          id: agentId,
+          name: conv.agents.name,
+          email: conv.agents.email,
           total: 0,
           open: 0,
           in_progress: 0,
@@ -51,7 +71,7 @@ router.get('/agents', async (req, res) => {
         };
       }
 
-      agentMap[agentId].total += 1;
+      agentMap[agentId].total++;
       if (conv.status) {
         agentMap[agentId][conv.status] = (agentMap[agentId][conv.status] || 0) + 1;
       }
