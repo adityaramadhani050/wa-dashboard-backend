@@ -4,7 +4,7 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 
-import { connectToWhatsApp, setIO } from './baileys/connection.js';
+import { connectToWhatsApp, setIO, getSock } from './baileys/connection.js';
 import conversationsRouter from './routes/conversations.js';
 import statsRouter from './routes/stats.js';
 import messagesRouter from './routes/messages.js';
@@ -16,17 +16,28 @@ const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: {
     origin: '*',
-    methods: ['GET', 'POST', 'PATCH'],
+    methods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: false,
   },
+  transports: ['websocket', 'polling'],
 });
 
 setIO(io);
 
-app.use(cors());
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
 app.use(express.json());
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({
+    status: 'ok',
+    wa_connected: !!getSock(),
+    timestamp: new Date().toISOString(),
+  });
 });
 
 app.use('/api/conversations', conversationsRouter);
@@ -35,6 +46,10 @@ app.use('/api/messages', messagesRouter);
 
 io.on('connection', (socket) => {
   console.log('Dashboard client connected:', socket.id);
+
+  const sock = getSock();
+  socket.emit('wa_status', { connected: !!sock });
+
   socket.on('disconnect', () => {
     console.log('Dashboard client disconnected:', socket.id);
   });
