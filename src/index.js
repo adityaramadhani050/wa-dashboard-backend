@@ -43,18 +43,6 @@ app.get("/health", (req, res) => {
   });
 });
 
-// Tambahkan di src/routes/conversations.js atau buat file baru
-router.post('/repair-contacts', async (req, res) => {
-  // Dipanggil sekali setelah WA connect untuk update kontak @lid lama
-  const { data: contacts } = await supabase
-    .from('contacts')
-    .select('id, phone')
-    .like('phone', '%@lid%')  // yang belum ter-resolve
-
-  // Tidak bisa di-resolve tanpa Map — return daftar yang masih LID
-  res.json({ unresolvedCount: contacts?.length || 0, contacts })
-})
-
 app.use("/api/conversations", conversationsRouter);
 app.use("/api/stats", statsRouter);
 app.use("/api/messages", messagesRouter);
