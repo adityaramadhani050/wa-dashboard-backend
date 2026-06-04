@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { supabase } from '../db/supabase.js';
-import { getSock } from '../baileys/connection.js';
+import { getSock, resolveJidForSend } from '../baileys/connection.js';
 
 const router = Router();
 
@@ -40,14 +40,6 @@ router.get('/', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
-// Tambahkan di src/routes/conversations.js atau buat file baru
-router.post('/repair-contacts', async (req, res) => {
-  // Dipanggil sekali setelah WA connect untuk update kontak @lid lama
-  const { data: contacts } = await supabase
-    .from('contacts')
-    .select('id, phone')
-    .like('phone', '%@lid%')  // yang belum ter-resolve
 
   // Tidak bisa di-resolve tanpa Map — return daftar yang masih LID
   res.json({ unresolvedCount: contacts?.length || 0, contacts })
@@ -147,9 +139,9 @@ router.post('/:id/messages', async (req, res) => {
     if (!rawPhone) {
       return res.status(422).json({ error: 'No phone number linked to this conversation' });
     }
-    const phone = rawPhone.split('@')[0];
-
-    const jid = `${phone}@s.whatsapp.net`;
+    const storedPhone = rawPhone.split('@')[0];
+    const jid = resolveJidForSend(storedPhone);
+    console.log(`[Send] conversation=${id} storedPhone=${storedPhone} jid=${jid}`);
     await sock.sendMessage(jid, { text: message });
 
     const { data: saved, error: msgError } = await supabase
