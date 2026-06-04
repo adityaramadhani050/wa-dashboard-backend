@@ -59,6 +59,6 @@ io.on("connection", (socket) => {
 
 httpServer.listen(PORT, '0.0.0.0', async () => {
   console.log(`Server running on ${PORT}`)
-  setSocketIO(io)
+  setIO(io)
   await connectToWhatsApp()
 })
