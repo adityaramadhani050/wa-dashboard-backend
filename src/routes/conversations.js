@@ -131,10 +131,11 @@ router.post('/:id/messages', async (req, res) => {
       return res.status(404).json({ error: 'Conversation not found' });
     }
 
-    const phone = conversation.contact?.phone;
-    if (!phone) {
+    const rawPhone = conversation.contact?.phone;
+    if (!rawPhone) {
       return res.status(422).json({ error: 'No phone number linked to this conversation' });
     }
+    const phone = rawPhone.split('@')[0];
 
     const jid = `${phone}@s.whatsapp.net`;
     await sock.sendMessage(jid, { text: message });
