@@ -27,6 +27,24 @@ export function getSock() {
   return sock;
 }
 
+export function resolveJidForSend(storedPhone) {
+  // 1. Cek apakah ini LID yang sudah ter-resolve di map
+  const realPhone = lidToPhone.get(storedPhone);
+  if (realPhone) {
+    console.log(`[JID] Resolved LID ${storedPhone} → ${realPhone}`);
+    return `${realPhone}@s.whatsapp.net`;
+  }
+
+  // 2. Terlihat seperti nomor HP asli (10-15 digit)
+  if (/^\d{10,15}$/.test(storedPhone)) {
+    return `${storedPhone}@s.whatsapp.net`;
+  }
+
+  // 3. LID belum ter-resolve — kirim sebagai @lid (Baileys multi-device support)
+  console.log(`[JID] Unresolved phone ${storedPhone}, trying @lid`);
+  return `${storedPhone}@lid`;
+}
+
 // Resolve real phone from JID — handles both @s.whatsapp.net and @lid
 function resolvePhone(jid) {
   const raw = jid.split('@')[0];
