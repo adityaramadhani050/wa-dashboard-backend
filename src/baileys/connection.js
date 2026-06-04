@@ -3,11 +3,12 @@ import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
+  makeInMemoryStore,
+  getContentType,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import { supabase } from '../db/supabase.js';
 import QRCode from 'qrcode';
-import { createRequire } from 'module';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -17,6 +18,9 @@ const AUTH_FOLDER = path.join(__dirname, '../../.wa_auth');
 let sock = null;
 let ioInstance = null;
 
+// In-memory store to resolve LID → real phone mappings
+const store = makeInMemoryStore({});
+
 export function setIO(io) {
   ioInstance = io;
 }
@@ -25,14 +29,39 @@ export function getSock() {
   return sock;
 }
 
+// Resolve the best phone number from a JID
+// @lid JIDs are WhatsApp internal IDs, try to resolve to real phone via store
+function resolvePhone(jid, storeContacts = {}) {
+  const raw = jid.split('@')[0];
+  if (!jid.endsWith('@lid')) return raw;
+
+  // Try to find real number from store contacts
+  const contact = storeContacts[jid];
+  if (contact?.notify) return contact.notify.replace(/\D/g, '');
+  if (contact?.verifiedName) return contact.verifiedName;
+  if (contact?.id) return contact.id.split('@')[0];
+
+  // Fallback: use LID number as-is (not ideal but better than crashing)
+  return raw;
+}
+
 async function upsertContact(phone, pushName) {
   const { data: existing } = await supabase
     .from('contacts')
-    .select('id')
+    .select('id, name, phone')
     .eq('phone', phone)
     .single();
 
-  if (existing) return existing.id;
+  if (existing) {
+    // Update name if we now have a real name and previously only had phone as name
+    if (pushName && pushName !== phone && existing.name === existing.phone) {
+      await supabase
+        .from('contacts')
+        .update({ name: pushName })
+        .eq('id', existing.id);
+    }
+    return existing.id;
+  }
 
   const { data, error } = await supabase
     .from('contacts')
@@ -113,6 +142,9 @@ export async function connectToWhatsApp() {
     syncFullHistory: false,
   });
 
+  // Bind store to socket events for LID resolution
+  store.bind(sock.ev);
+
   sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
@@ -157,17 +189,23 @@ export async function connectToWhatsApp() {
 
         if (jid.endsWith('@g.us')) continue;
 
-        const phone = jid.split('@')[0];
-        const pushName = msg.pushName || phone;
+        // Resolve real phone number (handles both @s.whatsapp.net and @lid)
+        const phone = resolvePhone(jid, store.contacts || {});
+
+        // Only use pushName from received messages — for sent messages,
+        // pushName is your own account name, not the contact's name
+        const contactName = fromMe ? null : (msg.pushName || null);
+
         const body =
           msg.message?.conversation ||
           msg.message?.extendedTextMessage?.text ||
           msg.message?.imageMessage?.caption ||
+          msg.message?.videoMessage?.caption ||
           '[media]';
 
         const timestamp = msg.messageTimestamp;
 
-        const contactId = await upsertContact(phone, pushName);
+        const contactId = await upsertContact(phone, contactName);
         const conversationId = await upsertConversation(contactId);
 
         const savedMessage = await saveMessage({
