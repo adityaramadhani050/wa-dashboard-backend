@@ -157,7 +157,7 @@ export async function connectToWhatsApp() {
 
         if (jid.endsWith('@g.us')) continue;
 
-        const phone = jid.replace('@s.whatsapp.net', '');
+        const phone = jid.split('@')[0];
         const pushName = msg.pushName || phone;
         const body =
           msg.message?.conversation ||
