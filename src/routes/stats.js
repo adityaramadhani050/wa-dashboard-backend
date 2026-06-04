@@ -40,10 +40,45 @@ router.get('/daily', async (req, res) => {
   }
 });
 
+// Contacts summary: total and new today
+router.get('/contacts', async (req, res) => {
+  try {
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
+    const [{ count: total, error: e1 }, { count: newToday, error: e2 }] = await Promise.all([
+      supabase.from('contacts').select('*', { count: 'exact', head: true }),
+      supabase.from('contacts')
+        .select('*', { count: 'exact', head: true })
+        .gte('created_at', todayStart.toISOString()),
+    ]);
+
+    if (e1) throw e1;
+    if (e2) throw e2;
+
+    res.json({ total: total || 0, newToday: newToday || 0 });
+  } catch (err) {
+    console.error('GET /stats/contacts error:', err);
+    // Fallback: try conversations table
+    try {
+      const todayStart = new Date();
+      todayStart.setHours(0, 0, 0, 0);
+      const [{ count: total }, { count: newToday }] = await Promise.all([
+        supabase.from('conversations').select('*', { count: 'exact', head: true }),
+        supabase.from('conversations')
+          .select('*', { count: 'exact', head: true })
+          .gte('created_at', todayStart.toISOString()),
+      ]);
+      res.json({ total: total || 0, newToday: newToday || 0 });
+    } catch (e2) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+});
+
 // Agent performance stats
 router.get('/agents', async (req, res) => {
   try {
-    // Separate queries to avoid join silently returning null
     const [{ data: agentsList, error: ae }, { data: convs, error: ce }] = await Promise.all([
       supabase.from('agents').select('id, name, email'),
       supabase.from('conversations').select('id, assigned_to, status'),
@@ -51,7 +86,6 @@ router.get('/agents', async (req, res) => {
     if (ae) throw ae;
     if (ce) throw ce;
 
-    // Build agent lookup
     const agentById = {};
     for (const a of (agentsList || [])) {
       agentById[a.id] = {
@@ -61,12 +95,10 @@ router.get('/agents', async (req, res) => {
       };
     }
 
-    // Collect assigned conversation IDs
     const assignedConvIds = (convs || [])
       .filter(c => c.assigned_to && agentById[c.assigned_to])
       .map(c => c.id);
 
-    // Fetch messages for response time — only for assigned convs
     let msgsByConv = {};
     if (assignedConvIds.length > 0) {
       const { data: msgs } = await supabase
@@ -81,7 +113,6 @@ router.get('/agents', async (req, res) => {
       }
     }
 
-    // Aggregate per agent
     for (const conv of (convs || [])) {
       const agent = agentById[conv.assigned_to];
       if (!agent) continue;
@@ -92,7 +123,6 @@ router.get('/agents', async (req, res) => {
       else if (s === 'in_progress') agent.in_progress++;
       else if (s === 'resolved') agent.resolved++;
 
-      // Compute first-response time for this conversation
       const msgs = msgsByConv[conv.id] || [];
       const firstIn = msgs.find(m => !m.from_me);
       if (firstIn) {
