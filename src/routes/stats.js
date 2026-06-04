@@ -3,7 +3,7 @@ import { supabase } from '../db/supabase.js';
 
 const router = Router();
 
-// Daily message stats from last 14 days — computed from messages table
+// Daily message stats from last 14 days
 router.get('/daily', async (req, res) => {
   try {
     const since = new Date();
@@ -17,7 +17,6 @@ router.get('/daily', async (req, res) => {
 
     if (error) throw error;
 
-    // Build date map for last 14 days (fill gaps with zeros)
     const byDate = {};
     for (let i = 0; i < 14; i++) {
       const d = new Date(since);
@@ -27,7 +26,7 @@ router.get('/daily', async (req, res) => {
     }
 
     for (const msg of messages) {
-      const key = msg.timestamp.split('T')[0];
+      const key = (msg.timestamp || '').split('T')[0];
       if (!byDate[key]) continue;
       byDate[key].messages++;
       if (msg.from_me) byDate[key].outgoing++;
@@ -44,40 +43,77 @@ router.get('/daily', async (req, res) => {
 // Agent performance stats
 router.get('/agents', async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from('conversations')
-      .select(`
-        assigned_to,
-        status,
-        agents:assigned_to (id, name, email)
-      `);
+    // Separate queries to avoid join silently returning null
+    const [{ data: agentsList, error: ae }, { data: convs, error: ce }] = await Promise.all([
+      supabase.from('agents').select('id, name, email'),
+      supabase.from('conversations').select('id, assigned_to, status'),
+    ]);
+    if (ae) throw ae;
+    if (ce) throw ce;
 
-    if (error) throw error;
+    // Build agent lookup
+    const agentById = {};
+    for (const a of (agentsList || [])) {
+      agentById[a.id] = {
+        id: a.id, name: a.name, email: a.email,
+        total: 0, open: 0, in_progress: 0, resolved: 0,
+        _responseTimes: [],
+      };
+    }
 
-    const agentMap = {};
-    for (const conv of data) {
-      const agentId = conv.assigned_to;
-      if (!agentId || !conv.agents) continue;
+    // Collect assigned conversation IDs
+    const assignedConvIds = (convs || [])
+      .filter(c => c.assigned_to && agentById[c.assigned_to])
+      .map(c => c.id);
 
-      if (!agentMap[agentId]) {
-        agentMap[agentId] = {
-          id: agentId,
-          name: conv.agents.name,
-          email: conv.agents.email,
-          total: 0,
-          open: 0,
-          in_progress: 0,
-          resolved: 0,
-        };
-      }
+    // Fetch messages for response time — only for assigned convs
+    let msgsByConv = {};
+    if (assignedConvIds.length > 0) {
+      const { data: msgs } = await supabase
+        .from('messages')
+        .select('conversation_id, from_me, timestamp')
+        .in('conversation_id', assignedConvIds)
+        .order('timestamp', { ascending: true });
 
-      agentMap[agentId].total++;
-      if (conv.status) {
-        agentMap[agentId][conv.status] = (agentMap[agentId][conv.status] || 0) + 1;
+      for (const m of (msgs || [])) {
+        if (!msgsByConv[m.conversation_id]) msgsByConv[m.conversation_id] = [];
+        msgsByConv[m.conversation_id].push(m);
       }
     }
 
-    res.json(Object.values(agentMap));
+    // Aggregate per agent
+    for (const conv of (convs || [])) {
+      const agent = agentById[conv.assigned_to];
+      if (!agent) continue;
+
+      agent.total++;
+      const s = conv.status || 'open';
+      if (s === 'open') agent.open++;
+      else if (s === 'in_progress') agent.in_progress++;
+      else if (s === 'resolved') agent.resolved++;
+
+      // Compute first-response time for this conversation
+      const msgs = msgsByConv[conv.id] || [];
+      const firstIn = msgs.find(m => !m.from_me);
+      if (firstIn) {
+        const firstOut = msgs.find(m => m.from_me && m.timestamp > firstIn.timestamp);
+        if (firstOut) {
+          const diffMin = (new Date(firstOut.timestamp) - new Date(firstIn.timestamp)) / 60000;
+          agent._responseTimes.push(diffMin);
+        }
+      }
+    }
+
+    const result = Object.values(agentById)
+      .filter(a => a.total > 0)
+      .map(({ _responseTimes, ...a }) => ({
+        ...a,
+        avgResponse: _responseTimes.length > 0
+          ? Math.round(_responseTimes.reduce((s, t) => s + t, 0) / _responseTimes.length)
+          : null,
+      }));
+
+    res.json(result);
   } catch (err) {
     console.error('GET /stats/agents error:', err);
     res.status(500).json({ error: err.message });
