@@ -18,20 +18,11 @@ let sock = null;
 let ioInstance = null;
 let isConnected = false;
 
-// LID → real phone mapping, populated from contacts.upsert event
 const lidToPhone = new Map();
 
-export function setIO(io) {
-  ioInstance = io;
-}
-
-export function getSock() {
-  return sock;
-}
-
-export function getIsConnected() {
-  return isConnected;
-}
+export function setIO(io) { ioInstance = io; }
+export function getSock() { return sock; }
+export function getIsConnected() { return isConnected; }
 
 async function clearAuthFolder() {
   try {
@@ -54,24 +45,18 @@ export async function resetSession() {
 }
 
 export function resolveJidForSend(storedPhone) {
-  // 1. Cek apakah ini LID yang sudah ter-resolve di map
   const realPhone = lidToPhone.get(storedPhone);
   if (realPhone) {
     console.log(`[JID] Resolved LID ${storedPhone} → ${realPhone}`);
     return `${realPhone}@s.whatsapp.net`;
   }
-
-  // 2. Terlihat seperti nomor HP asli (10-15 digit)
-  if (/^\d{10,15}$/.test(storedPhone)) {
+  if (/^\d{10,13}$/.test(storedPhone)) {
     return `${storedPhone}@s.whatsapp.net`;
   }
-
-  // 3. LID belum ter-resolve — kirim sebagai @lid (Baileys multi-device support)
   console.log(`[JID] Unresolved phone ${storedPhone}, trying @lid`);
   return `${storedPhone}@lid`;
 }
 
-// Resolve real phone from JID — handles both @s.whatsapp.net and @lid
 function resolvePhone(jid) {
   const raw = jid.split('@')[0];
   if (!jid.endsWith('@lid')) return raw;
@@ -86,23 +71,15 @@ async function upsertContact(phone, pushName) {
     .single();
 
   if (existing) {
-    // Update name if we now have a real name and previously only had phone as name
     if (pushName && pushName !== phone && existing.name === existing.phone) {
-      await supabase
-        .from('contacts')
-        .update({ name: pushName })
-        .eq('id', existing.id);
+      await supabase.from('contacts').update({ name: pushName }).eq('id', existing.id);
     }
     return existing.id;
   }
 
   const { data, error } = await supabase
     .from('contacts')
-    .insert({
-      phone,
-      name: pushName || phone,
-      first_seen: new Date().toISOString(),
-    })
+    .insert({ phone, name: pushName || phone, first_seen: new Date().toISOString() })
     .select('id')
     .single();
 
@@ -136,7 +113,7 @@ async function upsertConversation(contactId) {
   return data.id;
 }
 
-async function saveMessage({ conversationId, fromMe, body, timestamp }) {
+async function saveMessage({ conversationId, fromMe, body, timestamp, waMessageId }) {
   const { data, error } = await supabase
     .from('messages')
     .insert({
@@ -144,6 +121,8 @@ async function saveMessage({ conversationId, fromMe, body, timestamp }) {
       from_me: fromMe,
       body,
       timestamp: new Date(timestamp * 1000).toISOString(),
+      status: fromMe ? 'sent' : null,
+      wa_message_id: waMessageId || null,
     })
     .select()
     .single();
@@ -177,24 +156,16 @@ export async function connectToWhatsApp() {
 
   sock.ev.on('creds.update', saveCreds);
 
-  // Build LID → real phone mapping from contact sync
-  // contacts.upsert fires on initial sync and when new contacts appear
-  // Each contact with a real JID (@s.whatsapp.net) may also have a .lid field
   sock.ev.on('contacts.upsert', (contacts) => {
     for (const contact of contacts) {
       if (!contact.id) continue;
       const phone = contact.id.split('@')[0];
-
-      // Map LID → real phone if contact has both
       if (contact.lid) {
         const lid = contact.lid.split('@')[0];
         lidToPhone.set(lid, phone);
       }
-
-      // Also handle reverse: if this contact IS a LID entry with a known number
       if (contact.id.endsWith('@lid') && contact.notify) {
         const lid = phone;
-        // notify may contain the real number in some Baileys versions
         const realPhone = contact.notify.replace(/\D/g, '');
         if (realPhone) lidToPhone.set(lid, realPhone);
       }
@@ -215,7 +186,6 @@ export async function connectToWhatsApp() {
     if (qr) {
       try {
         const qrDataURL = await QRCode.toDataURL(qr);
-        console.log('New QR code generated, emitting to frontend...');
         ioInstance?.emit('qr', qrDataURL);
       } catch (err) {
         console.error('QR generation error:', err);
@@ -224,6 +194,7 @@ export async function connectToWhatsApp() {
 
     if (connection === 'open') {
       console.log('WhatsApp connected!');
+      isConnected = true;
       ioInstance?.emit('wa_status', { connected: true });
     }
 
@@ -251,13 +222,9 @@ export async function connectToWhatsApp() {
 
         const fromMe = msg.key.fromMe;
         const jid = msg.key.remoteJid;
-
         if (jid.endsWith('@g.us')) continue;
 
         const phone = resolvePhone(jid);
-
-        // Only use pushName from received messages
-        // For sent messages, pushName is your own WA account name
         const contactName = fromMe ? null : (msg.pushName || null);
 
         const body =
@@ -268,6 +235,7 @@ export async function connectToWhatsApp() {
           '[media]';
 
         const timestamp = msg.messageTimestamp;
+        const waMessageId = msg.key.id;
 
         const contactId = await upsertContact(phone, contactName);
         const conversationId = await upsertConversation(contactId);
@@ -277,6 +245,7 @@ export async function connectToWhatsApp() {
           fromMe,
           body,
           timestamp,
+          waMessageId,
         });
 
         await supabase
@@ -293,6 +262,27 @@ export async function connectToWhatsApp() {
         });
       } catch (err) {
         console.error('Error processing message:', err);
+      }
+    }
+  });
+
+  // Track delivery receipts for sent messages
+  sock.ev.on('messages.update', async (updates) => {
+    for (const { key, update } of updates) {
+      if (!key.fromMe || !update.status) continue;
+      try {
+        let status = 'sent';
+        if (update.status >= 4) status = 'read';
+        else if (update.status >= 3) status = 'delivered';
+
+        await supabase
+          .from('messages')
+          .update({ status })
+          .eq('wa_message_id', key.id);
+
+        console.log(`[Receipt] msg=${key.id} status=${status}`);
+      } catch (err) {
+        console.warn('[Receipt] Update error:', err.message);
       }
     }
   });

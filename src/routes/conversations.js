@@ -17,13 +17,11 @@ router.get('/', async (req, res) => {
       `)
       .order('updated_at', { ascending: false });
 
-    if (agent_id) {
-      query = query.eq('assigned_to', agent_id);
-    }
+    if (agent_id) query = query.eq('assigned_to', agent_id);
 
     const { data, error } = await query;
-
     if (error) throw error;
+
     const enriched = await Promise.all(
       data.map(async (conv) => {
         const { data: lastMsg } = await supabase
@@ -32,17 +30,17 @@ router.get('/', async (req, res) => {
           .eq('conversation_id', conv.id)
           .order('timestamp', { ascending: false })
           .limit(1)
-          .maybeSingle()
+          .maybeSingle();
 
         return {
           ...conv,
           lastMessage: lastMsg?.body || null,
           lastMessageAt: lastMsg?.timestamp || conv.updated_at,
-        }
+        };
       })
-    )
+    );
 
-    res.json(enriched)
+    res.json(enriched);
   } catch (err) {
     console.error('GET /conversations error:', err);
     res.status(500).json({ error: err.message });
@@ -61,7 +59,6 @@ router.get('/:id/messages', async (req, res) => {
     if (error) throw error;
     res.json(data);
   } catch (err) {
-    console.error(`GET /conversations/${req.params.id}/messages error:`, err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -70,10 +67,7 @@ router.post('/:id/assign', async (req, res) => {
   try {
     const { id } = req.params;
     const { agent_id } = req.body;
-
-    if (!agent_id) {
-      return res.status(400).json({ error: 'agent_id is required' });
-    }
+    if (!agent_id) return res.status(400).json({ error: 'agent_id is required' });
 
     const { data, error } = await supabase
       .from('conversations')
@@ -85,7 +79,6 @@ router.post('/:id/assign', async (req, res) => {
     if (error) throw error;
     res.json(data);
   } catch (err) {
-    console.error(`POST /conversations/${req.params.id}/assign error:`, err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -94,11 +87,9 @@ router.patch('/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
-
     const validStatuses = ['open', 'in_progress', 'resolved'];
-    if (!status || !validStatuses.includes(status)) {
+    if (!status || !validStatuses.includes(status))
       return res.status(400).json({ error: `status must be one of: ${validStatuses.join(', ')}` });
-    }
 
     const { data, error } = await supabase
       .from('conversations')
@@ -110,7 +101,6 @@ router.patch('/:id/status', async (req, res) => {
     if (error) throw error;
     res.json(data);
   } catch (err) {
-    console.error(`PATCH /conversations/${req.params.id}/status error:`, err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -119,15 +109,10 @@ router.post('/:id/messages', async (req, res) => {
   try {
     const { id } = req.params;
     const { message } = req.body;
-
-    if (!message) {
-      return res.status(400).json({ error: 'message is required' });
-    }
+    if (!message) return res.status(400).json({ error: 'message is required' });
 
     const sock = getSock();
-    if (!sock) {
-      return res.status(503).json({ error: 'WhatsApp is not connected yet' });
-    }
+    if (!sock) return res.status(503).json({ error: 'WhatsApp is not connected yet' });
 
     const { data: conversation, error: convError } = await supabase
       .from('conversations')
@@ -135,18 +120,19 @@ router.post('/:id/messages', async (req, res) => {
       .eq('id', id)
       .single();
 
-    if (convError || !conversation) {
+    if (convError || !conversation)
       return res.status(404).json({ error: 'Conversation not found' });
-    }
 
     const rawPhone = conversation.contact?.phone;
-    if (!rawPhone) {
+    if (!rawPhone)
       return res.status(422).json({ error: 'No phone number linked to this conversation' });
-    }
+
     const storedPhone = rawPhone.split('@')[0];
     const jid = resolveJidForSend(storedPhone);
     console.log(`[Send] conversation=${id} storedPhone=${storedPhone} jid=${jid}`);
-    await sock.sendMessage(jid, { text: message });
+
+    const sentResult = await sock.sendMessage(jid, { text: message });
+    const waMessageId = sentResult?.key?.id || null;
 
     const { data: saved, error: msgError } = await supabase
       .from('messages')
@@ -155,6 +141,8 @@ router.post('/:id/messages', async (req, res) => {
         from_me: true,
         body: message,
         timestamp: new Date().toISOString(),
+        status: 'sent',
+        wa_message_id: waMessageId,
       })
       .select()
       .single();
