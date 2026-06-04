@@ -3,8 +3,7 @@ import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
 import cors from "cors";
-
-import { connectToWhatsApp, setIO, getSock } from "./baileys/connection.js";
+import { connectToWhatsApp, setIO, getSock, getIsConnected, resetSession } from "./baileys/connection.js";
 import conversationsRouter from "./routes/conversations.js";
 import statsRouter from "./routes/stats.js";
 import messagesRouter from "./routes/messages.js";
@@ -48,11 +47,20 @@ app.use("/api/stats", statsRouter);
 app.use("/api/messages", messagesRouter);
 app.use("/api/agents", agentsRouter);
 
+app.post("/api/wa/reset", async (req, res) => {
+  try {
+    await resetSession();
+    res.json({ success: true, message: 'Session reset, scan QR to reconnect' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 io.on("connection", (socket) => {
   console.log("Dashboard client connected:", socket.id);
 
   const sock = getSock();
-  socket.emit("wa_status", { connected: !!sock });
+  socket.emit("wa_status", { connected: getIsConnected() });
 
   socket.on("disconnect", () => {
     console.log("Dashboard client disconnected:", socket.id);
