@@ -10,7 +10,7 @@ router.get('/', async (req, res) => {
       .from('conversations')
       .select(`
         *,
-        contacts (id, phone, name, first_seen, created_at),
+        contact:contacts (id, phone, name, first_seen, created_at),
         agents:assigned_to (id, name, email, role)
       `)
       .order('updated_at', { ascending: false });
@@ -20,16 +20,16 @@ router.get('/', async (req, res) => {
       data.map(async (conv) => {
         const { data: lastMsg } = await supabase
           .from('messages')
-          .select('body, created_at')
+          .select('body, timestamp')
           .eq('conversation_id', conv.id)
-          .order('created_at', { ascending: false })
+          .order('timestamp', { ascending: false })
           .limit(1)
           .maybeSingle()
 
         return {
           ...conv,
           lastMessage: lastMsg?.body || null,
-          lastMessageAt: lastMsg?.created_at || conv.updated_at,
+          lastMessageAt: lastMsg?.timestamp || conv.updated_at,
         }
       })
     )
@@ -71,7 +71,7 @@ router.post('/:id/assign', async (req, res) => {
       .from('conversations')
       .update({ assigned_to: agent_id, updated_at: new Date().toISOString() })
       .eq('id', id)
-      .select()
+      .select(`*, contact:contacts (id, phone, name), agents:assigned_to (id, name, email, role)`)
       .single();
 
     if (error) throw error;
@@ -123,7 +123,7 @@ router.post('/:id/messages', async (req, res) => {
 
     const { data: conversation, error: convError } = await supabase
       .from('conversations')
-      .select('id, contacts (phone)')
+      .select('id, contact:contacts (phone)')
       .eq('id', id)
       .single();
 
@@ -131,7 +131,7 @@ router.post('/:id/messages', async (req, res) => {
       return res.status(404).json({ error: 'Conversation not found' });
     }
 
-    const phone = conversation.contacts?.phone;
+    const phone = conversation.contact?.phone;
     if (!phone) {
       return res.status(422).json({ error: 'No phone number linked to this conversation' });
     }
