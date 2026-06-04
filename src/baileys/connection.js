@@ -21,6 +21,10 @@ export function setIO(io) {
   ioInstance = io;
 }
 
+export function getSock() {
+  return sock;
+}
+
 async function upsertContact(phone, pushName) {
   const { data: existing } = await supabase
     .from('contacts')

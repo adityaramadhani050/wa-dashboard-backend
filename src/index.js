@@ -7,6 +7,7 @@ import cors from 'cors';
 import { connectToWhatsApp, setIO } from './baileys/connection.js';
 import conversationsRouter from './routes/conversations.js';
 import statsRouter from './routes/stats.js';
+import messagesRouter from './routes/messages.js';
 
 const PORT = process.env.PORT || 3000;
 const app = express();
@@ -30,6 +31,7 @@ app.get('/health', (req, res) => {
 
 app.use('/api/conversations', conversationsRouter);
 app.use('/api/stats', statsRouter);
+app.use('/api/messages', messagesRouter);
 
 io.on('connection', (socket) => {
   console.log('Dashboard client connected:', socket.id);
