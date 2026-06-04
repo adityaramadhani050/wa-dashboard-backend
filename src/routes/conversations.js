@@ -41,10 +41,6 @@ router.get('/', async (req, res) => {
   }
 });
 
-  // Tidak bisa di-resolve tanpa Map — return daftar yang masih LID
-  res.json({ unresolvedCount: contacts?.length || 0, contacts })
-})
-
 router.get('/:id/messages', async (req, res) => {
   try {
     const { id } = req.params;
