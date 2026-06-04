@@ -7,6 +7,7 @@ import makeWASocket, {
 import { Boom } from '@hapi/boom';
 import { supabase } from '../db/supabase.js';
 import QRCode from 'qrcode';
+import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -15,6 +16,7 @@ const AUTH_FOLDER = path.join(__dirname, '../../.wa_auth');
 
 let sock = null;
 let ioInstance = null;
+let isConnected = false;
 
 // LID → real phone mapping, populated from contacts.upsert event
 const lidToPhone = new Map();
@@ -25,6 +27,30 @@ export function setIO(io) {
 
 export function getSock() {
   return sock;
+}
+
+export function getIsConnected() {
+  return isConnected;
+}
+
+async function clearAuthFolder() {
+  try {
+    await fs.rm(AUTH_FOLDER, { recursive: true, force: true });
+    console.log('[Auth] Auth folder cleared');
+  } catch (err) {
+    console.warn('[Auth] Could not clear auth folder:', err.message);
+  }
+}
+
+export async function resetSession() {
+  if (sock) {
+    try { sock.ev.removeAllListeners(); sock.end(); } catch (e) {}
+    sock = null;
+  }
+  isConnected = false;
+  ioInstance?.emit('wa_status', { connected: false });
+  await clearAuthFolder();
+  setTimeout(() => connectToWhatsApp(), 500);
 }
 
 export function resolveJidForSend(storedPhone) {
@@ -202,14 +228,15 @@ export async function connectToWhatsApp() {
     }
 
     if (connection === 'close') {
-      const shouldReconnect =
-        lastDisconnect?.error instanceof Boom &&
-        lastDisconnect.error.output?.statusCode !== DisconnectReason.loggedOut;
-
-      console.log('Connection closed. Reconnect:', shouldReconnect);
+      isConnected = false;
       ioInstance?.emit('wa_status', { connected: false });
-
-      if (shouldReconnect) {
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const loggedOut = statusCode === DisconnectReason.loggedOut;
+      console.log(`[WA] Closed. statusCode=${statusCode} loggedOut=${loggedOut}`);
+      if (loggedOut) {
+        await clearAuthFolder();
+        setTimeout(() => connectToWhatsApp(), 1000);
+      } else {
         setTimeout(() => connectToWhatsApp(), 3000);
       }
     }
