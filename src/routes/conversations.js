@@ -16,7 +16,25 @@ router.get('/', async (req, res) => {
       .order('updated_at', { ascending: false });
 
     if (error) throw error;
-    res.json(data);
+    const enriched = await Promise.all(
+      data.map(async (conv) => {
+        const { data: lastMsg } = await supabase
+          .from('messages')
+          .select('body, created_at')
+          .eq('conversation_id', conv.id)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle()
+
+        return {
+          ...conv,
+          lastMessage: lastMsg?.body || null,
+          lastMessageAt: lastMsg?.created_at || conv.updated_at,
+        }
+      })
+    )
+
+    res.json(enriched)
   } catch (err) {
     console.error('GET /conversations error:', err);
     res.status(500).json({ error: err.message });
