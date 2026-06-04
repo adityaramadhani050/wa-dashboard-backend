@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { supabase } from '../db/supabase.js';
+import { getSock } from '../baileys/connection.js';
 
 const router = Router();
 
@@ -84,6 +85,63 @@ router.patch('/:id/status', async (req, res) => {
     res.json(data);
   } catch (err) {
     console.error(`PATCH /conversations/${req.params.id}/status error:`, err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/:id/messages', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { message } = req.body;
+
+    if (!message) {
+      return res.status(400).json({ error: 'message is required' });
+    }
+
+    const sock = getSock();
+    if (!sock) {
+      return res.status(503).json({ error: 'WhatsApp is not connected yet' });
+    }
+
+    const { data: conversation, error: convError } = await supabase
+      .from('conversations')
+      .select('id, contacts (phone)')
+      .eq('id', id)
+      .single();
+
+    if (convError || !conversation) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+
+    const phone = conversation.contacts?.phone;
+    if (!phone) {
+      return res.status(422).json({ error: 'No phone number linked to this conversation' });
+    }
+
+    const jid = `${phone}@s.whatsapp.net`;
+    await sock.sendMessage(jid, { text: message });
+
+    const { data: saved, error: msgError } = await supabase
+      .from('messages')
+      .insert({
+        conversation_id: id,
+        from_me: true,
+        body: message,
+        timestamp: new Date().toISOString(),
+      })
+      .select()
+      .single();
+
+    if (msgError) throw msgError;
+
+    await supabase
+      .from('conversations')
+      .update({ updated_at: new Date().toISOString() })
+      .eq('id', id);
+
+    res.json({ success: true, message: saved });
+  } catch (err) {
+    console.error(`POST /conversations/${req.params.id}/messages error:`, err);
     res.status(500).json({ error: err.message });
   }
 });
