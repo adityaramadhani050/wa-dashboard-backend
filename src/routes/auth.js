@@ -5,16 +5,16 @@ import { supabase } from '../db/supabase.js';
 const router = Router();
 
 router.post('/login', async (req, res) => {
-  const { email, password } = req.body;
-  if (!email || !password) return res.status(400).json({ error: 'Email dan password wajib diisi' });
+  const { username, password } = req.body;
+  if (!username || !password) return res.status(400).json({ error: 'Username dan password wajib diisi' });
 
   const { data, error } = await supabase
     .from('agents')
-    .select('id, name, email, role, password_hash')
-    .eq('email', email.toLowerCase().trim())
+    .select('id, name, email, username, role, password_hash')
+    .eq('username', username.trim().toLowerCase())
     .single();
 
-  if (error || !data) return res.status(401).json({ error: 'Email tidak ditemukan' });
+  if (error || !data) return res.status(401).json({ error: 'Username tidak ditemukan' });
 
   if (!data.password_hash) {
     return res.status(401).json({ error: 'Password belum diset. Hubungi admin.' });

@@ -4,12 +4,12 @@ import { supabase } from '../db/supabase.js';
 
 const router = Router();
 
-// List agents (no password_hash exposed)
+// List agents
 router.get('/', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('agents')
-      .select('id, name, email, role, created_at')
+      .select('id, name, username, email, role, created_at')
       .order('created_at', { ascending: false });
 
     if (error) throw error;
@@ -23,22 +23,30 @@ router.get('/', async (req, res) => {
 // Create agent
 router.post('/', async (req, res) => {
   try {
-    const { name, email, role = 'agent', password } = req.body;
-    if (!name || !email || !password) {
-      return res.status(400).json({ error: 'name, email, dan password wajib diisi' });
+    const { name, username, email, role = 'agent', password } = req.body;
+    if (!name || !username || !password) {
+      return res.status(400).json({ error: 'name, username, dan password wajib diisi' });
     }
 
-    // Check duplicate email
+    const cleanUsername = username.trim().toLowerCase();
+
+    // Check duplicate username
     const { data: existing } = await supabase
-      .from('agents').select('id').eq('email', email.toLowerCase().trim()).maybeSingle();
-    if (existing) return res.status(409).json({ error: 'Email sudah terdaftar' });
+      .from('agents').select('id').eq('username', cleanUsername).maybeSingle();
+    if (existing) return res.status(409).json({ error: 'Username sudah digunakan' });
 
     const password_hash = await bcrypt.hash(password, 10);
 
     const { data, error } = await supabase
       .from('agents')
-      .insert({ name, email: email.toLowerCase().trim(), role, password_hash })
-      .select('id, name, email, role, created_at')
+      .insert({
+        name,
+        username: cleanUsername,
+        email: email ? email.toLowerCase().trim() : null,
+        role,
+        password_hash,
+      })
+      .select('id, name, username, email, role, created_at')
       .single();
 
     if (error) throw error;
@@ -49,15 +57,16 @@ router.post('/', async (req, res) => {
   }
 });
 
-// Update agent (name, email, role; password optional)
+// Update agent
 router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, email, role, password } = req.body;
+    const { name, username, email, role, password } = req.body;
 
     const updates = {};
     if (name) updates.name = name;
-    if (email) updates.email = email.toLowerCase().trim();
+    if (username) updates.username = username.trim().toLowerCase();
+    if (email !== undefined) updates.email = email ? email.toLowerCase().trim() : null;
     if (role) updates.role = role;
     if (password) updates.password_hash = await bcrypt.hash(password, 10);
 
@@ -69,7 +78,7 @@ router.put('/:id', async (req, res) => {
       .from('agents')
       .update(updates)
       .eq('id', id)
-      .select('id, name, email, role, created_at')
+      .select('id, name, username, email, role, created_at')
       .single();
 
     if (error) throw error;
