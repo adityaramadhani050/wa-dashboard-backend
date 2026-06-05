@@ -3,23 +3,35 @@ import { supabase } from '../db/supabase.js';
 
 const router = Router();
 
-// Daily message stats from last 14 days
+// Daily message stats — supports ?from=YYYY-MM-DD&to=YYYY-MM-DD
+// Also upserts each day's stats into daily_stats table
 router.get('/daily', async (req, res) => {
   try {
-    const since = new Date();
-    since.setDate(since.getDate() - 13);
-    since.setHours(0, 0, 0, 0);
+    // Default: last 14 days
+    const toDate = req.query.to
+      ? new Date(req.query.to)
+      : new Date();
+    const fromDate = req.query.from
+      ? new Date(req.query.from)
+      : new Date(toDate.getTime() - 13 * 86400000);
+
+    fromDate.setHours(0, 0, 0, 0);
+    toDate.setHours(23, 59, 59, 999);
+
+    const diffDays = Math.round((toDate - fromDate) / 86400000) + 1;
 
     const { data: messages, error } = await supabase
       .from('messages')
       .select('timestamp, from_me')
-      .gte('timestamp', since.toISOString());
+      .gte('timestamp', fromDate.toISOString())
+      .lte('timestamp', toDate.toISOString());
 
     if (error) throw error;
 
+    // Build date map with gap filling
     const byDate = {};
-    for (let i = 0; i < 14; i++) {
-      const d = new Date(since);
+    for (let i = 0; i < diffDays; i++) {
+      const d = new Date(fromDate);
       d.setDate(d.getDate() + i);
       const key = d.toISOString().split('T')[0];
       byDate[key] = { date: key, messages: 0, incoming: 0, outgoing: 0 };
@@ -33,7 +45,55 @@ router.get('/daily', async (req, res) => {
       else byDate[key].incoming++;
     }
 
-    res.json(Object.values(byDate));
+    const result = Object.values(byDate);
+
+    // Upsert each day into daily_stats (save to DB)
+    // Get new contacts and resolved per day
+    const { data: contacts } = await supabase
+      .from('contacts')
+      .select('created_at')
+      .gte('created_at', fromDate.toISOString())
+      .lte('created_at', toDate.toISOString());
+
+    const { data: resolved } = await supabase
+      .from('conversations')
+      .select('updated_at')
+      .eq('status', 'resolved')
+      .gte('updated_at', fromDate.toISOString())
+      .lte('updated_at', toDate.toISOString());
+
+    const contactsByDate = {};
+    for (const c of (contacts || [])) {
+      const key = (c.created_at || '').split('T')[0];
+      contactsByDate[key] = (contactsByDate[key] || 0) + 1;
+    }
+    const resolvedByDate = {};
+    for (const c of (resolved || [])) {
+      const key = (c.updated_at || '').split('T')[0];
+      resolvedByDate[key] = (resolvedByDate[key] || 0) + 1;
+    }
+
+    // Upsert into daily_stats for each day in range
+    const upsertRows = result.map(d => ({
+      date: d.date,
+      total_messages: d.messages,
+      new_contacts: contactsByDate[d.date] || 0,
+      resolved_chats: resolvedByDate[d.date] || 0,
+    }));
+
+    // Fire and forget — don't block the response
+    supabase.from('daily_stats')
+      .upsert(upsertRows, { onConflict: 'date' })
+      .then(({ error: e }) => { if (e) console.warn('daily_stats upsert warn:', e.message); });
+
+    // Attach extra fields to result
+    const enriched = result.map(d => ({
+      ...d,
+      new_contacts: contactsByDate[d.date] || 0,
+      resolved_chats: resolvedByDate[d.date] || 0,
+    }));
+
+    res.json(enriched);
   } catch (err) {
     console.error('GET /stats/daily error:', err);
     res.status(500).json({ error: err.message });
@@ -58,8 +118,7 @@ router.get('/contacts', async (req, res) => {
 
     res.json({ total: total || 0, newToday: newToday || 0 });
   } catch (err) {
-    console.error('GET /stats/contacts error:', err);
-    // Fallback: try conversations table
+    // Fallback to conversations table
     try {
       const todayStart = new Date();
       todayStart.setHours(0, 0, 0, 0);
