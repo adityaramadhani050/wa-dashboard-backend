@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { supabase } from '../db/supabase.js';
-import { getSock, resolveJidForSend } from '../baileys/connection.js';
+import { getSock } from '../baileys/connection.js';
 
 const router = Router();
 
@@ -116,20 +116,26 @@ router.post('/:id/messages', async (req, res) => {
 
     const { data: conversation, error: convError } = await supabase
       .from('conversations')
-      .select('id, contact:contacts (phone)')
+      .select('id, wa_jid, contact:contacts (phone)')
       .eq('id', id)
       .single();
 
     if (convError || !conversation)
       return res.status(404).json({ error: 'Conversation not found' });
 
-    const rawPhone = conversation.contact?.phone;
-    if (!rawPhone)
-      return res.status(422).json({ error: 'No phone number linked to this conversation' });
+    // Use stored wa_jid (original WhatsApp JID) — works for @lid contacts too
+    let jid = conversation.wa_jid;
 
-    const storedPhone = rawPhone.split('@')[0];
-    const jid = resolveJidForSend(storedPhone);
-    console.log(`[Send] conversation=${id} storedPhone=${storedPhone} jid=${jid}`);
+    // Fallback: build from phone number if wa_jid not stored yet
+    if (!jid) {
+      const rawPhone = conversation.contact?.phone;
+      if (!rawPhone)
+        return res.status(422).json({ error: 'No phone number linked to this conversation' });
+      const phone = rawPhone.split('@')[0];
+      jid = `${phone}@s.whatsapp.net`;
+    }
+
+    console.log(`[Send] conversation=${id} jid=${jid}`);
 
     const sentResult = await sock.sendMessage(jid, { text: message });
     const waMessageId = sentResult?.key?.id || null;
