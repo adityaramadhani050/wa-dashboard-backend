@@ -3,6 +3,7 @@ import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
+  downloadMediaMessage,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import { supabase } from '../db/supabase.js';
@@ -62,10 +63,61 @@ function extractBody(message) {
     message.buttonsResponseMessage?.selectedDisplayText ||
     message.listResponseMessage?.title ||
     message.templateButtonReplyMessage?.selectedDisplayText ||
-    message.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson ||
     message.reactionMessage?.text ||
     null
   );
+}
+
+function getMediaInfo(message) {
+  if (message.imageMessage) {
+    return {
+      type: 'image',
+      msgObj: message.imageMessage,
+      ext: 'jpg',
+      filename: null,
+    };
+  }
+  if (message.videoMessage) {
+    return {
+      type: 'video',
+      msgObj: message.videoMessage,
+      ext: 'mp4',
+      filename: null,
+    };
+  }
+  if (message.audioMessage) {
+    return {
+      type: 'audio',
+      msgObj: message.audioMessage,
+      ext: message.audioMessage.ptt ? 'ogg' : 'mp3',
+      filename: null,
+    };
+  }
+  if (message.documentMessage) {
+    const doc = message.documentMessage;
+    const ext = doc.fileName?.split('.').pop() || 'bin';
+    return { type: 'document', msgObj: doc, ext, filename: doc.fileName };
+  }
+  if (message.documentWithCaptionMessage?.message?.documentMessage) {
+    const doc = message.documentWithCaptionMessage.message.documentMessage;
+    const ext = doc.fileName?.split('.').pop() || 'bin';
+    return { type: 'document', msgObj: doc, ext, filename: doc.fileName };
+  }
+  return null;
+}
+
+async function uploadToStorage(buffer, filename, mimetype) {
+  try {
+    const { error } = await supabase.storage
+      .from('wa-media')
+      .upload(filename, buffer, { contentType: mimetype, upsert: true });
+    if (error) throw error;
+    const { data: { publicUrl } } = supabase.storage.from('wa-media').getPublicUrl(filename);
+    return publicUrl;
+  } catch (err) {
+    console.warn('[Storage] Upload error:', err.message);
+    return null;
+  }
 }
 
 async function upsertContact(phone, pushName) {
@@ -92,8 +144,6 @@ async function upsertContact(phone, pushName) {
   return data.id;
 }
 
-// Store the original WhatsApp JID (wa_jid) so replies always work,
-// even for @lid contacts where the phone number is not a real number.
 async function upsertConversation(contactId, waJid) {
   const { data: existing } = await supabase
     .from('conversations')
@@ -104,7 +154,6 @@ async function upsertConversation(contactId, waJid) {
     .single();
 
   if (existing) {
-    // Update wa_jid if missing or changed
     if (waJid && existing.wa_jid !== waJid) {
       await supabase.from('conversations').update({ wa_jid: waJid }).eq('id', existing.id);
     }
@@ -127,16 +176,20 @@ async function upsertConversation(contactId, waJid) {
   return data.id;
 }
 
-async function saveMessage({ conversationId, fromMe, body, timestamp, waMessageId }) {
+async function saveMessage({ conversationId, fromMe, body, timestamp, waMessageId, mediaType, mediaUrl, mediaFilename, mediaMimetype }) {
   const { data, error } = await supabase
     .from('messages')
     .insert({
       conversation_id: conversationId,
       from_me: fromMe,
-      body,
+      body: body || null,
       timestamp: new Date(timestamp * 1000).toISOString(),
       status: fromMe ? 'sent' : null,
       wa_message_id: waMessageId || null,
+      media_type: mediaType || null,
+      media_url: mediaUrl || null,
+      media_filename: mediaFilename || null,
+      media_mimetype: mediaMimetype || null,
     })
     .select()
     .single();
@@ -257,21 +310,43 @@ export async function connectToWhatsApp() {
 
         const phone = resolvePhone(jid);
         const contactName = fromMe ? null : (msg.pushName || null);
-
-        const body = extractBody(msg.message) || '[media]';
+        const body = extractBody(msg.message);
         const timestamp = msg.messageTimestamp;
         const waMessageId = msg.key.id;
 
+        // Detect and download media
+        const mediaInfo = getMediaInfo(msg.message);
+        let mediaUrl = null, mediaFilename = null, mediaMimetype = null;
+
+        if (mediaInfo) {
+          try {
+            const buffer = await downloadMediaMessage(
+              msg, 'buffer', {},
+              { logger: console, reuploadRequest: sock.updateMediaMessage }
+            );
+            const storageFilename = `${Date.now()}-${waMessageId}.${mediaInfo.ext}`;
+            mediaMimetype = mediaInfo.msgObj.mimetype || 'application/octet-stream';
+            mediaFilename = mediaInfo.filename || storageFilename;
+            mediaUrl = await uploadToStorage(buffer, storageFilename, mediaMimetype);
+            console.log(`[Media] ${mediaInfo.type} uploaded: ${storageFilename}`);
+          } catch (err) {
+            console.warn('[Media] Download/upload failed:', err.message);
+          }
+        }
+
         const contactId = await upsertContact(phone, contactName);
-        // Pass original jid so we can reply correctly even for @lid contacts
         const conversationId = await upsertConversation(contactId, jid);
 
         const savedMessage = await saveMessage({
           conversationId,
           fromMe,
-          body,
+          body: body || (mediaInfo ? `[${mediaInfo.type}]` : '[media]'),
           timestamp,
           waMessageId,
+          mediaType: mediaInfo?.type || null,
+          mediaUrl,
+          mediaFilename,
+          mediaMimetype,
         });
 
         await supabase
