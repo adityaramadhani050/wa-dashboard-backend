@@ -70,20 +70,10 @@ function extractBody(message) {
 
 function getMediaInfo(message) {
   if (message.imageMessage) {
-    return {
-      type: 'image',
-      msgObj: message.imageMessage,
-      ext: 'jpg',
-      filename: null,
-    };
+    return { type: 'image', msgObj: message.imageMessage, ext: 'jpg', filename: null };
   }
   if (message.videoMessage) {
-    return {
-      type: 'video',
-      msgObj: message.videoMessage,
-      ext: 'mp4',
-      filename: null,
-    };
+    return { type: 'video', msgObj: message.videoMessage, ext: 'mp4', filename: null };
   }
   if (message.audioMessage) {
     return {
@@ -308,11 +298,25 @@ export async function connectToWhatsApp() {
         const jid = msg.key.remoteJid;
         if (jid.endsWith('@g.us')) continue;
 
+        const waMessageId = msg.key.id;
+
+        // Deduplication: skip if this wa_message_id already exists
+        if (waMessageId) {
+          const { data: dup } = await supabase
+            .from('messages')
+            .select('id')
+            .eq('wa_message_id', waMessageId)
+            .maybeSingle();
+          if (dup) {
+            console.log(`[Dedup] Skipping duplicate message: ${waMessageId}`);
+            continue;
+          }
+        }
+
         const phone = resolvePhone(jid);
         const contactName = fromMe ? null : (msg.pushName || null);
         const body = extractBody(msg.message);
         const timestamp = msg.messageTimestamp;
-        const waMessageId = msg.key.id;
 
         // Detect and download media
         const mediaInfo = getMediaInfo(msg.message);
