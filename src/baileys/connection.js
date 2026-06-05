@@ -44,24 +44,12 @@ export async function resetSession() {
   setTimeout(() => connectToWhatsApp(), 500);
 }
 
-export function resolveJidForSend(storedPhone) {
-  const realPhone = lidToPhone.get(storedPhone);
-  if (realPhone) {
-    console.log(`[JID] Resolved LID ${storedPhone} → ${realPhone}`);
-    return `${realPhone}@s.whatsapp.net`;
-  }
-  if (/^\d{10,13}$/.test(storedPhone)) return `${storedPhone}@s.whatsapp.net`;
-  console.log(`[JID] Unresolved phone ${storedPhone}, trying @lid`);
-  return `${storedPhone}@lid`;
-}
-
 function resolvePhone(jid) {
   const raw = jid.split('@')[0];
   if (!jid.endsWith('@lid')) return raw;
   return lidToPhone.get(raw) || raw;
 }
 
-// Extract text body from any message type
 function extractBody(message) {
   if (!message) return null;
   return (
@@ -104,22 +92,31 @@ async function upsertContact(phone, pushName) {
   return data.id;
 }
 
-async function upsertConversation(contactId) {
+// Store the original WhatsApp JID (wa_jid) so replies always work,
+// even for @lid contacts where the phone number is not a real number.
+async function upsertConversation(contactId, waJid) {
   const { data: existing } = await supabase
     .from('conversations')
-    .select('id')
+    .select('id, wa_jid')
     .eq('contact_id', contactId)
     .order('created_at', { ascending: false })
     .limit(1)
     .single();
 
-  if (existing) return existing.id;
+  if (existing) {
+    // Update wa_jid if missing or changed
+    if (waJid && existing.wa_jid !== waJid) {
+      await supabase.from('conversations').update({ wa_jid: waJid }).eq('id', existing.id);
+    }
+    return existing.id;
+  }
 
   const { data, error } = await supabase
     .from('conversations')
     .insert({
       contact_id: contactId,
       status: 'open',
+      wa_jid: waJid || null,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     })
@@ -169,8 +166,6 @@ export async function connectToWhatsApp() {
     },
     printQRInTerminal: true,
     syncFullHistory: false,
-    // Required: lets Baileys re-encrypt messages on retry requests.
-    // Without this, recipients see "Waiting for this message..."
     getMessage: async (key) => {
       try {
         if (!key.id) return undefined;
@@ -250,7 +245,6 @@ export async function connectToWhatsApp() {
       try {
         if (!msg.message) continue;
 
-        // Skip protocol/reaction/poll messages silently
         const msgKeys = Object.keys(msg.message);
         const isProtocol = msgKeys.every(k =>
           ['messageContextInfo', 'protocolMessage', 'senderKeyDistributionMessage', 'reactionMessage'].includes(k)
@@ -269,7 +263,8 @@ export async function connectToWhatsApp() {
         const waMessageId = msg.key.id;
 
         const contactId = await upsertContact(phone, contactName);
-        const conversationId = await upsertConversation(contactId);
+        // Pass original jid so we can reply correctly even for @lid contacts
+        const conversationId = await upsertConversation(contactId, jid);
 
         const savedMessage = await saveMessage({
           conversationId,
@@ -297,7 +292,6 @@ export async function connectToWhatsApp() {
     }
   });
 
-  // Track delivery receipts for outgoing messages
   sock.ev.on('messages.update', async (updates) => {
     for (const { key, update } of updates) {
       if (!key.fromMe || !update.status) continue;
