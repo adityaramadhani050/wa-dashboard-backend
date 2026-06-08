@@ -22,7 +22,6 @@ const io = new Server(httpServer, {
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: false,
   },
-  // Prefer WebSocket, polling as fallback
   transports: ['websocket', 'polling'],
   pingTimeout: 20000,
   pingInterval: 10000,
@@ -30,16 +29,18 @@ const io = new Server(httpServer, {
 
 setIO(io)
 
-// Redis subscriber: broadcast new messages to all Socket.io clients
+// Redis subscriber: broadcast events to all Socket.io clients
 if (redisAvailable && subscriber) {
-  subscriber.subscribe('new_message', (err) => {
+  subscriber.subscribe('new_message', 'message_status', (err) => {
     if (err) console.error('[Redis] Subscribe error:', err.message)
-    else console.log('[Redis] Subscribed to new_message channel')
+    else console.log('[Redis] Subscribed to new_message + message_status channels')
   })
   subscriber.on('message', (channel, raw) => {
-    if (channel === 'new_message') {
-      try { io.emit('new_message', JSON.parse(raw)) } catch {}
-    }
+    try {
+      const data = JSON.parse(raw)
+      if (channel === 'new_message') io.emit('new_message', data)
+      if (channel === 'message_status') io.emit('message_status', data)
+    } catch {}
   })
   console.log('[Redis] Pub/sub enabled')
 } else {
@@ -79,9 +80,7 @@ app.post('/api/wa/reset', async (req, res) => {
 
 io.on('connection', (socket) => {
   console.log('Dashboard client connected:', socket.id, '| transport:', socket.conn.transport.name)
-
   socket.emit('wa_status', { connected: getIsConnected() })
-
   socket.on('disconnect', () => {
     console.log('Dashboard client disconnected:', socket.id)
   })

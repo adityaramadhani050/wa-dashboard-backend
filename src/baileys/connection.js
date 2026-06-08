@@ -267,7 +267,6 @@ export async function connectToWhatsApp() {
       ioInstance?.emit('wa_status', { connected: false })
       const statusCode = lastDisconnect?.error?.output?.statusCode
       const loggedOut = statusCode === DisconnectReason.loggedOut
-      console.log(`[WA] Closed. statusCode=${statusCode} loggedOut=${loggedOut}`)
       if (loggedOut) {
         await clearAuthFolder()
         setTimeout(() => connectToWhatsApp(), 1000)
@@ -299,7 +298,6 @@ export async function connectToWhatsApp() {
         const isGroup = jid.endsWith('@g.us')
         const waMessageId = msg.key.id
 
-        // Deduplication
         if (waMessageId) {
           const { data: dup } = await supabase
             .from('messages').select('id').eq('wa_message_id', waMessageId).maybeSingle()
@@ -307,15 +305,12 @@ export async function connectToWhatsApp() {
         }
 
         let phone, contactName
-
         if (isGroup) {
           phone = jid.split('@')[0]
           try {
             const meta = await sock.groupMetadata(jid)
             contactName = meta?.subject || phone
-          } catch {
-            contactName = phone
-          }
+          } catch { contactName = phone }
         } else {
           phone = resolvePhone(jid)
           contactName = fromMe ? null : (msg.pushName || null)
@@ -323,8 +318,6 @@ export async function connectToWhatsApp() {
 
         const body = extractBody(msg.message)
         const timestamp = msg.messageTimestamp
-
-        // Download media
         const mediaInfo = getMediaInfo(msg.message)
         let mediaUrl = null, mediaFilename = null, mediaMimetype = null
 
@@ -353,21 +346,16 @@ export async function connectToWhatsApp() {
           mediaUrl, mediaFilename, mediaMimetype,
         })
 
-        // --- EMIT IMMEDIATELY after save, before slow side-effects ---
+        // Emit immediately after save
         const payload = { message: savedMessage, conversationId, contactId }
         const published = await publish('new_message', payload)
-        if (!published) {
-          // Direct emit fallback when Redis is not configured
-          ioInstance?.emit('new_message', payload)
-        }
+        if (!published) ioInstance?.emit('new_message', payload)
 
-        // Side-effects run async — do NOT await
+        // Side-effects async
         supabase.from('conversations')
           .update({ updated_at: new Date().toISOString() })
           .eq('id', conversationId)
-          .then(() => {})
-          .catch(() => {})
-
+          .then(() => {}).catch(() => {})
         incrementDailyStats().catch(() => {})
 
       } catch (err) {
@@ -384,7 +372,25 @@ export async function connectToWhatsApp() {
         if (update.status >= 4) status = 'read'
         else if (update.status >= 3) status = 'delivered'
 
-        await supabase.from('messages').update({ status }).eq('wa_message_id', key.id)
+        // Update DB and get the message id + conversation_id back
+        const { data: updated } = await supabase
+          .from('messages')
+          .update({ status })
+          .eq('wa_message_id', key.id)
+          .select('id, conversation_id')
+          .maybeSingle()
+
+        if (updated) {
+          // Emit status update so frontend can update in real-time without reload
+          const payload = {
+            messageId: updated.id,
+            conversationId: updated.conversation_id,
+            waMessageId: key.id,
+            status,
+          }
+          const published = await publish('message_status', payload)
+          if (!published) ioInstance?.emit('message_status', payload)
+        }
       } catch (err) {
         console.warn('[Receipt] Update error:', err.message)
       }
