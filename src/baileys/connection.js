@@ -296,11 +296,17 @@ export async function connectToWhatsApp() {
 
         const fromMe = msg.key.fromMe;
         const jid = msg.key.remoteJid;
-        if (jid.endsWith('@g.us')) continue;
 
+        // Skip WhatsApp status/story broadcasts
+        if (jid === 'status@broadcast') continue;
+
+        // Skip ephemeral/system JIDs
+        if (jid.endsWith('@broadcast') || jid.endsWith('@temp')) continue;
+
+        const isGroup = jid.endsWith('@g.us');
         const waMessageId = msg.key.id;
 
-        // Deduplication: skip if this wa_message_id already exists
+        // Deduplication
         if (waMessageId) {
           const { data: dup } = await supabase
             .from('messages')
@@ -313,8 +319,24 @@ export async function connectToWhatsApp() {
           }
         }
 
-        const phone = resolvePhone(jid);
-        const contactName = fromMe ? null : (msg.pushName || null);
+        let phone, contactName;
+
+        if (isGroup) {
+          // For group messages: use group JID as identifier
+          // Try to fetch group metadata for the group name
+          phone = jid.split('@')[0];
+          try {
+            const meta = await sock.groupMetadata(jid);
+            contactName = meta?.subject || phone;
+          } catch {
+            contactName = phone;
+          }
+          console.log(`[Group] Message in group: ${contactName}`);
+        } else {
+          phone = resolvePhone(jid);
+          contactName = fromMe ? null : (msg.pushName || null);
+        }
+
         const body = extractBody(msg.message);
         const timestamp = msg.messageTimestamp;
 
