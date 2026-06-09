@@ -9,6 +9,7 @@ import statsRouter from './routes/stats.js'
 import messagesRouter from './routes/messages.js'
 import agentsRouter from './routes/agents.js'
 import authRouter from './routes/auth.js'
+import contactsRouter from './routes/contacts.js'
 import { subscriber, redisAvailable } from './db/redis.js'
 
 const PORT = process.env.PORT || 3000
@@ -29,7 +30,7 @@ const io = new Server(httpServer, {
 
 setIO(io)
 
-const REDIS_CHANNELS = ['new_message', 'message_status', 'message_deleted', 'message_edited']
+const REDIS_CHANNELS = ['new_message', 'message_status']
 
 if (redisAvailable && subscriber) {
   subscriber.subscribe(...REDIS_CHANNELS, (err) => {
@@ -68,6 +69,7 @@ app.use('/api/conversations', conversationsRouter)
 app.use('/api/stats', statsRouter)
 app.use('/api/messages', messagesRouter)
 app.use('/api/agents', agentsRouter)
+app.use('/api/contacts', contactsRouter)
 
 app.post('/api/wa/reset', async (req, res) => {
   try {

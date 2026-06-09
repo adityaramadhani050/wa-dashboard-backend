@@ -24,7 +24,6 @@ const lidToPhone = new Map()
 
 export function setIO(io) { ioInstance = io }
 export function getSock() { return sock }
-export function getIO() { return ioInstance }
 export function getIsConnected() { return isConnected }
 
 async function clearAuthFolder() {

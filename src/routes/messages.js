@@ -1,8 +1,7 @@
 import { Router } from 'express';
 import multer from 'multer';
-import { getSock, getIO } from '../baileys/connection.js';
+import { getSock } from '../baileys/connection.js';
 import { supabase } from '../db/supabase.js';
-import { publish } from '../db/redis.js';
 
 const router = Router();
 const upload = multer({
@@ -17,50 +16,6 @@ function mediaTypeFromMime(mime) {
   if (mime.startsWith('audio/')) return 'audio';
   return 'document';
 }
-
-router.delete('/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    // Fetch conversation_id before deleting
-    const { data: msg } = await supabase
-      .from('messages').select('id, conversation_id').eq('id', id).maybeSingle();
-    const { error } = await supabase.from('messages').delete().eq('id', id);
-    if (error) throw error;
-    // Emit realtime event
-    if (msg) {
-      const payload = { messageId: msg.id, conversationId: msg.conversation_id };
-      const published = await publish('message_deleted', payload);
-      if (!published) getIO()?.emit('message_deleted', payload);
-    }
-    res.json({ success: true });
-  } catch (err) {
-    console.error('DELETE /messages/:id error:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.patch('/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { body } = req.body;
-    if (!body?.trim()) return res.status(400).json({ error: 'body is required' });
-    const { data, error } = await supabase
-      .from('messages')
-      .update({ body: body.trim() })
-      .eq('id', id)
-      .select()
-      .single();
-    if (error) throw error;
-    // Emit realtime event
-    const payload = { messageId: data.id, conversationId: data.conversation_id, body: data.body };
-    const published = await publish('message_edited', payload);
-    if (!published) getIO()?.emit('message_edited', payload);
-    res.json(data);
-  } catch (err) {
-    console.error('PATCH /messages/:id error:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
 
 router.post('/send', async (req, res) => {
   try {
