@@ -24,6 +24,7 @@ const lidToPhone = new Map()
 
 export function setIO(io) { ioInstance = io }
 export function getSock() { return sock }
+export function getIO() { return ioInstance }
 export function getIsConnected() { return isConnected }
 
 async function clearAuthFolder() {
@@ -346,12 +347,10 @@ export async function connectToWhatsApp() {
           mediaUrl, mediaFilename, mediaMimetype,
         })
 
-        // Emit immediately after save
         const payload = { message: savedMessage, conversationId, contactId }
         const published = await publish('new_message', payload)
         if (!published) ioInstance?.emit('new_message', payload)
 
-        // Side-effects async
         supabase.from('conversations')
           .update({ updated_at: new Date().toISOString() })
           .eq('id', conversationId)
@@ -372,7 +371,6 @@ export async function connectToWhatsApp() {
         if (update.status >= 4) status = 'read'
         else if (update.status >= 3) status = 'delivered'
 
-        // Update DB and get the message id + conversation_id back
         const { data: updated } = await supabase
           .from('messages')
           .update({ status })
@@ -381,7 +379,6 @@ export async function connectToWhatsApp() {
           .maybeSingle()
 
         if (updated) {
-          // Emit status update so frontend can update in real-time without reload
           const payload = {
             messageId: updated.id,
             conversationId: updated.conversation_id,
