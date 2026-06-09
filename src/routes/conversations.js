@@ -63,6 +63,19 @@ router.get('/:id/messages', async (req, res) => {
   }
 });
 
+router.delete('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await supabase.from('messages').delete().eq('conversation_id', id);
+    const { error } = await supabase.from('conversations').delete().eq('id', id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    console.error('DELETE /conversations/:id error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.post('/:id/assign', async (req, res) => {
   try {
     const { id } = req.params;
@@ -123,10 +136,8 @@ router.post('/:id/messages', async (req, res) => {
     if (convError || !conversation)
       return res.status(404).json({ error: 'Conversation not found' });
 
-    // Use stored wa_jid (original WhatsApp JID) — works for @lid contacts too
     let jid = conversation.wa_jid;
 
-    // Fallback: build from phone number if wa_jid not stored yet
     if (!jid) {
       const rawPhone = conversation.contact?.phone;
       if (!rawPhone)

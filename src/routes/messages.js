@@ -6,7 +6,7 @@ import { supabase } from '../db/supabase.js';
 const router = Router();
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 64 * 1024 * 1024 }, // 64 MB
+  limits: { fileSize: 64 * 1024 * 1024 },
 });
 
 function mediaTypeFromMime(mime) {
@@ -16,6 +16,37 @@ function mediaTypeFromMime(mime) {
   if (mime.startsWith('audio/')) return 'audio';
   return 'document';
 }
+
+router.delete('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { error } = await supabase.from('messages').delete().eq('id', id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    console.error('DELETE /messages/:id error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.patch('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { body } = req.body;
+    if (!body?.trim()) return res.status(400).json({ error: 'body is required' });
+    const { data, error } = await supabase
+      .from('messages')
+      .update({ body: body.trim() })
+      .eq('id', id)
+      .select()
+      .single();
+    if (error) throw error;
+    res.json(data);
+  } catch (err) {
+    console.error('PATCH /messages/:id error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 router.post('/send', async (req, res) => {
   try {
@@ -75,7 +106,6 @@ router.post('/send-media', upload.single('file'), async (req, res) => {
     const buffer = file.buffer;
     const caption_ = caption || undefined;
 
-    // Build Baileys message
     let baileysMsg;
     if (mediaType === 'image') {
       baileysMsg = { image: buffer, caption: caption_, mimetype: file.mimetype };
@@ -90,7 +120,6 @@ router.post('/send-media', upload.single('file'), async (req, res) => {
     const sentResult = await sock.sendMessage(jid, baileysMsg);
     const waMessageId = sentResult?.key?.id || null;
 
-    // Upload to Supabase Storage for persistent URL
     let mediaUrl = null;
     try {
       const storageFilename = `${Date.now()}-${file.originalname}`;
