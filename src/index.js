@@ -18,7 +18,7 @@ const httpServer = createServer(app)
 const io = new Server(httpServer, {
   cors: {
     origin: '*',
-    methods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: false,
   },
@@ -29,17 +29,17 @@ const io = new Server(httpServer, {
 
 setIO(io)
 
-// Redis subscriber: broadcast events to all Socket.io clients
+const REDIS_CHANNELS = ['new_message', 'message_status', 'message_deleted', 'message_edited']
+
 if (redisAvailable && subscriber) {
-  subscriber.subscribe('new_message', 'message_status', (err) => {
+  subscriber.subscribe(...REDIS_CHANNELS, (err) => {
     if (err) console.error('[Redis] Subscribe error:', err.message)
-    else console.log('[Redis] Subscribed to new_message + message_status channels')
+    else console.log(`[Redis] Subscribed to: ${REDIS_CHANNELS.join(', ')}`)
   })
   subscriber.on('message', (channel, raw) => {
     try {
       const data = JSON.parse(raw)
-      if (channel === 'new_message') io.emit('new_message', data)
-      if (channel === 'message_status') io.emit('message_status', data)
+      io.emit(channel, data)
     } catch {}
   })
   console.log('[Redis] Pub/sub enabled')
