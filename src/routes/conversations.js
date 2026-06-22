@@ -12,7 +12,7 @@ router.get('/', async (req, res) => {
       .from('conversations')
       .select(`
         *,
-        contact:contacts (id, phone, name, first_seen, created_at),
+        contact:contacts (id, phone, name, first_seen, created_at, manual_wa_number),
         agents:assigned_to (id, name, email, role)
       `)
       .order('updated_at', { ascending: false });
