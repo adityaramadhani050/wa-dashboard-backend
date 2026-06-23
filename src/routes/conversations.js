@@ -46,11 +46,20 @@ router.get('/', async (req, res) => {
           .limit(1)
           .maybeSingle();
 
+        let unreadQuery = supabase
+          .from('messages')
+          .select('id', { count: 'exact', head: true })
+          .eq('conversation_id', conv.id)
+          .eq('from_me', false);
+        if (conv.last_read_at) unreadQuery = unreadQuery.gt('timestamp', conv.last_read_at);
+        const { count: unreadCount } = await unreadQuery;
+
         return {
           ...conv,
           lastMessage: lastMsg?.body || null,
           lastMessageAt: lastMsg?.timestamp || conv.updated_at,
           tags: tagsByConversation[conv.id] || [],
+          unread: (unreadCount || 0) > 0,
         };
       })
     );
@@ -72,6 +81,14 @@ router.get('/:id/messages', async (req, res) => {
       .order('timestamp', { ascending: true });
 
     if (error) throw error;
+
+    // Mark conversation as read — fire-and-forget, don't block the response
+    supabase
+      .from('conversations')
+      .update({ last_read_at: new Date().toISOString() })
+      .eq('id', id)
+      .then(({ error: e }) => { if (e) console.warn('last_read_at update warn:', e.message); });
+
     res.json(data);
   } catch (err) {
     res.status(500).json({ error: err.message });

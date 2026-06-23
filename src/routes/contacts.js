@@ -89,6 +89,48 @@ router.get('/:id/notes', async (req, res) => {
   }
 });
 
+router.get('/:id/conversations', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { data, error } = await supabase
+      .from('conversations')
+      .select('id, status, updated_at, created_at')
+      .eq('contact_id', id)
+      .order('updated_at', { ascending: false });
+
+    if (error) throw error;
+
+    const conversationIds = (data || []).map((c) => c.id);
+    let lastMsgByConv = {};
+    if (conversationIds.length > 0) {
+      const results = await Promise.all(
+        conversationIds.map((cid) =>
+          supabase
+            .from('messages')
+            .select('body, timestamp')
+            .eq('conversation_id', cid)
+            .order('timestamp', { ascending: false })
+            .limit(1)
+            .maybeSingle()
+            .then(({ data: msg }) => ({ cid, msg }))
+        )
+      );
+      results.forEach(({ cid, msg }) => { lastMsgByConv[cid] = msg || null; });
+    }
+
+    const enriched = (data || []).map((conv) => ({
+      ...conv,
+      lastMessage: lastMsgByConv[conv.id]?.body || null,
+      lastMessageAt: lastMsgByConv[conv.id]?.timestamp || conv.updated_at,
+    }));
+
+    res.json(enriched);
+  } catch (err) {
+    console.error(`GET /contacts/${req.params.id}/conversations error:`, err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.post('/:id/notes', async (req, res) => {
   try {
     const { id } = req.params;

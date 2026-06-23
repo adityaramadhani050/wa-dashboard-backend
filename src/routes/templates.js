@@ -46,6 +46,52 @@ router.post('/', async (req, res) => {
   }
 });
 
+// Top templates by usage_count — for "Template Terpopuler" analytics
+router.get('/top', async (req, res) => {
+  try {
+    const limit = Number(req.query.limit) || 5;
+    const { data, error } = await supabase
+      .from('message_templates')
+      .select('*')
+      .order('usage_count', { ascending: false })
+      .limit(limit);
+
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) {
+    console.error('GET /templates/top error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Increment usage_count when a template is inserted into a chat
+router.post('/:id/use', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { data: current, error: fetchErr } = await supabase
+      .from('message_templates')
+      .select('usage_count')
+      .eq('id', id)
+      .single();
+
+    if (fetchErr) throw fetchErr;
+    if (!current) return res.status(404).json({ error: 'Template tidak ditemukan' });
+
+    const { data, error } = await supabase
+      .from('message_templates')
+      .update({ usage_count: (current.usage_count || 0) + 1 })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json(data);
+  } catch (err) {
+    console.error(`POST /templates/${req.params.id}/use error:`, err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Update template
 router.put('/:id', async (req, res) => {
   try {
