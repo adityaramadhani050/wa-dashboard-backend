@@ -132,4 +132,158 @@ router.post('/send-media', upload.single('file'), async (req, res) => {
   }
 });
 
+// List quick media gallery items
+router.get('/quick-media', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('quick_media')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) {
+    console.error('GET /messages/quick-media error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Upload new quick media item
+router.post('/quick-media', upload.single('file'), async (req, res) => {
+  try {
+    const { label, category } = req.body;
+    const file = req.file;
+
+    if (!file) return res.status(400).json({ error: 'file is required' });
+    if (!label) return res.status(400).json({ error: 'label is required' });
+
+    const mediaType = mediaTypeFromMime(file.mimetype);
+    const storageFilename = `${Date.now()}-${file.originalname}`;
+    const { error: uploadErr } = await supabase.storage
+      .from('wa-media')
+      .upload(storageFilename, file.buffer, { contentType: file.mimetype, upsert: true });
+    if (uploadErr) throw uploadErr;
+
+    const { data: { publicUrl } } = supabase.storage.from('wa-media').getPublicUrl(storageFilename);
+
+    const { data, error } = await supabase
+      .from('quick_media')
+      .insert({
+        label,
+        media_url: publicUrl,
+        media_type: mediaType,
+        mimetype: file.mimetype,
+        category: category || null,
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.status(201).json(data);
+  } catch (err) {
+    console.error('POST /messages/quick-media error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete quick media item
+router.delete('/quick-media/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { error } = await supabase.from('quick_media').delete().eq('id', id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    console.error('DELETE /messages/quick-media/:id error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Send a quick-media gallery item to a conversation
+router.post('/send-quick-media', async (req, res) => {
+  try {
+    const { conversation_id, quick_media_id, caption } = req.body;
+    if (!conversation_id) return res.status(400).json({ error: 'conversation_id is required' });
+    if (!quick_media_id) return res.status(400).json({ error: 'quick_media_id is required' });
+
+    const sock = getSock();
+    if (!sock) return res.status(503).json({ error: 'WhatsApp is not connected yet' });
+
+    const { data: quickMedia, error: qmError } = await supabase
+      .from('quick_media')
+      .select('*')
+      .eq('id', quick_media_id)
+      .single();
+    if (qmError || !quickMedia) return res.status(404).json({ error: 'Quick media not found' });
+
+    const { data: conversation, error: convError } = await supabase
+      .from('conversations')
+      .select('id, wa_jid, contact:contacts (phone)')
+      .eq('id', conversation_id)
+      .single();
+
+    if (convError || !conversation)
+      return res.status(404).json({ error: 'Conversation not found' });
+
+    let jid = conversation.wa_jid;
+
+    if (!jid) {
+      const rawPhone = conversation.contact?.phone;
+      if (!rawPhone)
+        return res.status(422).json({ error: 'No phone number linked to this conversation' });
+      const phone = rawPhone.split('@')[0];
+      jid = `${phone}@s.whatsapp.net`;
+    }
+
+    console.log(`[Send] conversation=${conversation_id} jid=${jid} quick_media=${quick_media_id}`);
+
+    const caption_ = caption || undefined;
+    const mediaType = quickMedia.media_type;
+
+    let baileysMsg;
+    if (mediaType === 'image') {
+      baileysMsg = { image: { url: quickMedia.media_url }, caption: caption_ };
+    } else if (mediaType === 'video') {
+      baileysMsg = { video: { url: quickMedia.media_url }, caption: caption_, mimetype: quickMedia.mimetype };
+    } else {
+      baileysMsg = {
+        document: { url: quickMedia.media_url },
+        mimetype: quickMedia.mimetype,
+        fileName: quickMedia.label,
+        caption: caption_,
+      };
+    }
+
+    const sentResult = await sock.sendMessage(jid, baileysMsg);
+    const waMessageId = sentResult?.key?.id || null;
+
+    const { data: saved, error } = await supabase
+      .from('messages')
+      .insert({
+        conversation_id,
+        from_me: true,
+        body: caption || `[${mediaType}] ${quickMedia.label}`,
+        timestamp: new Date().toISOString(),
+        status: 'sent',
+        wa_message_id: waMessageId,
+        media_type: mediaType,
+        media_url: quickMedia.media_url,
+        media_filename: quickMedia.label,
+        media_mimetype: quickMedia.mimetype,
+      })
+      .select().single();
+
+    if (error) throw error;
+
+    await supabase.from('conversations')
+      .update({ updated_at: new Date().toISOString() })
+      .eq('id', conversation_id);
+
+    res.json({ success: true, message: saved });
+  } catch (err) {
+    console.error('POST /messages/send-quick-media error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;
