@@ -5,17 +5,23 @@ const router = Router();
 
 router.get('/', async (req, res) => {
   try {
+    const { agent_id } = req.query;
+
     const { data, error } = await supabase
       .from('contacts')
       .select(`
         id, name, phone, first_seen, manual_wa_number,
-        conversations (updated_at)
+        conversations (updated_at, assigned_to)
       `)
       .order('first_seen', { ascending: false });
 
     if (error) throw error;
 
-    const enriched = data
+    const filtered = agent_id
+      ? data.filter(c => (c.conversations || []).some(cv => cv.assigned_to === agent_id))
+      : data;
+
+    const enriched = filtered
       .map(c => {
         const dates = (c.conversations || []).map(cv => cv.updated_at).filter(Boolean);
         const last_message_at = dates.length
