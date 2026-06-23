@@ -72,4 +72,45 @@ router.patch('/:id', async (req, res) => {
   }
 });
 
+router.get('/:id/notes', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { data, error } = await supabase
+      .from('contact_notes')
+      .select('*, agents(name)')
+      .eq('contact_id', id)
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) {
+    console.error(`GET /contacts/${req.params.id}/notes error:`, err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/:id/notes', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { agent_id, body } = req.body;
+    if (!body) return res.status(400).json({ error: 'body wajib diisi' });
+
+    const { data, error } = await supabase
+      .from('contact_notes')
+      .insert({
+        contact_id: id,
+        agent_id: agent_id || null,
+        body,
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.status(201).json(data);
+  } catch (err) {
+    console.error(`POST /contacts/${req.params.id}/notes error:`, err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;

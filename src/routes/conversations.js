@@ -22,6 +22,20 @@ router.get('/', async (req, res) => {
     const { data, error } = await query;
     if (error) throw error;
 
+    const conversationIds = data.map((conv) => conv.id);
+    const tagsByConversation = {};
+    if (conversationIds.length > 0) {
+      const { data: convTags } = await supabase
+        .from('conversation_tags')
+        .select('conversation_id, tags (id, name, color)')
+        .in('conversation_id', conversationIds);
+
+      (convTags || []).forEach((ct) => {
+        if (!tagsByConversation[ct.conversation_id]) tagsByConversation[ct.conversation_id] = [];
+        if (ct.tags) tagsByConversation[ct.conversation_id].push(ct.tags);
+      });
+    }
+
     const enriched = await Promise.all(
       data.map(async (conv) => {
         const { data: lastMsg } = await supabase
@@ -36,6 +50,7 @@ router.get('/', async (req, res) => {
           ...conv,
           lastMessage: lastMsg?.body || null,
           lastMessageAt: lastMsg?.timestamp || conv.updated_at,
+          tags: tagsByConversation[conv.id] || [],
         };
       })
     );
@@ -174,6 +189,48 @@ router.post('/:id/messages', async (req, res) => {
     res.json({ success: true, message: saved });
   } catch (err) {
     console.error(`POST /conversations/${req.params.id}/messages error:`, err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/:id/tags', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { tag_id } = req.body;
+    if (!tag_id) return res.status(400).json({ error: 'tag_id wajib diisi' });
+
+    const { data, error } = await supabase
+      .from('conversation_tags')
+      .insert({ conversation_id: id, tag_id })
+      .select()
+      .single();
+
+    if (error) {
+      if (error.code === '23505') {
+        return res.status(200).json({ success: true, message: 'Tag sudah ditambahkan sebelumnya' });
+      }
+      throw error;
+    }
+    res.status(201).json(data);
+  } catch (err) {
+    console.error(`POST /conversations/${req.params.id}/tags error:`, err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete('/:id/tags/:tagId', async (req, res) => {
+  try {
+    const { id, tagId } = req.params;
+    const { error } = await supabase
+      .from('conversation_tags')
+      .delete()
+      .eq('conversation_id', id)
+      .eq('tag_id', tagId);
+
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    console.error(`DELETE /conversations/${req.params.id}/tags/${req.params.tagId} error:`, err);
     res.status(500).json({ error: err.message });
   }
 });
