@@ -71,6 +71,38 @@ router.get('/', async (req, res) => {
   }
 });
 
+router.get('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data: conv, error } = await supabase
+      .from('conversations')
+      .select(`
+        *,
+        contact:contacts (id, phone, name, first_seen, created_at, manual_wa_number),
+        agents:assigned_to (id, name, email, role)
+      `)
+      .eq('id', id)
+      .maybeSingle();
+
+    if (error) throw error;
+    if (!conv) return res.status(404).json({ error: 'Percakapan tidak ditemukan' });
+
+    const { data: convTags } = await supabase
+      .from('conversation_tags')
+      .select('tags (id, name, color)')
+      .eq('conversation_id', id);
+
+    res.json({
+      ...conv,
+      tags: (convTags || []).map((ct) => ct.tags).filter(Boolean),
+    });
+  } catch (err) {
+    console.error('GET /conversations/:id error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.get('/:id/messages', async (req, res) => {
   try {
     const { id } = req.params;
