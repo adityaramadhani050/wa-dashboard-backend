@@ -94,8 +94,21 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   try {
     const { id } = req.params;
+
+    // Unassign this agent from related records first — agents.id is referenced
+    // by FK from conversations/contact_notes/reminders, so a plain delete would
+    // fail with a foreign key violation if any of these still point to it.
+    await supabase.from('conversations').update({ assigned_to: null }).eq('assigned_to', id);
+    await supabase.from('contact_notes').update({ agent_id: null }).eq('agent_id', id);
+    await supabase.from('reminders').update({ agent_id: null }).eq('agent_id', id);
+
     const { error } = await supabase.from('agents').delete().eq('id', id);
-    if (error) throw error;
+    if (error) {
+      if (error.code === '23503') {
+        return res.status(409).json({ error: 'Agent masih terkait dengan data lain dan tidak dapat dihapus.' });
+      }
+      throw error;
+    }
     res.json({ success: true });
   } catch (err) {
     console.error('DELETE /agents/:id error:', err);

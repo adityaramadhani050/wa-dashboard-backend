@@ -10,6 +10,10 @@ import messagesRouter from './routes/messages.js'
 import agentsRouter from './routes/agents.js'
 import authRouter from './routes/auth.js'
 import contactsRouter from './routes/contacts.js'
+import templatesRouter from './routes/templates.js'
+import tagsRouter from './routes/tags.js'
+import remindersRouter from './routes/reminders.js'
+import aiRouter from './routes/ai.js'
 import { subscriber, redisAvailable } from './db/redis.js'
 
 const PORT = process.env.PORT || 3000
@@ -70,6 +74,10 @@ app.use('/api/stats', statsRouter)
 app.use('/api/messages', messagesRouter)
 app.use('/api/agents', agentsRouter)
 app.use('/api/contacts', contactsRouter)
+app.use('/api/templates', templatesRouter)
+app.use('/api/tags', tagsRouter)
+app.use('/api/reminders', remindersRouter)
+app.use('/api/ai', aiRouter)
 
 app.post('/api/wa/reset', async (req, res) => {
   try {
