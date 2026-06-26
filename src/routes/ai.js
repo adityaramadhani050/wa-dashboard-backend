@@ -39,6 +39,14 @@ router.post('/suggest', async (req, res) => {
       .maybeSingle();
     const currentAgentId = convRow?.assigned_to || null;
 
+    // tag yang menempel pada percakapan ini — agar AI menyesuaikan saran
+    const { data: convTagRows } = await supabase
+      .from('conversation_tags')
+      .select('tags (name)')
+      .eq('conversation_id', conversation_id);
+    const convTags = (convTagRows || []).map((r) => r.tags?.name).filter(Boolean);
+    const convTagsText = convTags.length ? convTags.join(', ') : '(belum ada tag)';
+
     // kumpulkan id percakapan "berhasil/closing": status resolved + bertag deal/closing/closed
     const successfulIds = new Set();
     const { data: resolvedConvs } = await supabase
@@ -161,6 +169,15 @@ TAHAP 3 — ARAH KE SURVEI (HANYA jika kebutuhan sudah cukup tergali DAN diskusi
 - Baru di sini tawarkan SURVEI LOKASI GRATIS sebagai langkah natural untuk hitungan akurat. JANGAN mengajak menelepon.
 
 ATURAN EMAS: kalau RAGU sekarang tahap berapa, PILIH menggali kebutuhan / memberi value dulu — JANGAN menawarkan survei. Survei hanya muncul kalau benar-benar sudah waktunya. Tonjolkan manfaat & nilai, bukan cuma harga.
+
+TAG PERCAKAPAN INI: ${convTagsText}
+Tag di atas adalah penanda status dari tim sales — kalau ada, PATUHI dan sesuaikan saranmu (tag ini bisa MENGUBAH tahap di atas). Arti tag yang umum dipakai:
+- "Deal": customer SUDAH closing/beli. Jangan jualan lagi — fokus after-sales, ucapan terima kasih, atau bantu hal teknis/jadwal pemasangan.
+- "Fail": lead sudah TIDAK dilanjutkan. JANGAN memaksa jualan atau menawarkan survei. Cukup balasan sopan & ringan; boleh tanya halus kalau masih ada yang bisa dibantu, tanpa mendesak.
+- "Survey": survei lokasi SUDAH ditawarkan/dijadwalkan. JANGAN menawarkan survei lagi — lanjutkan dengan konfirmasi jadwal atau tindak lanjut hasil survei.
+- "Penawaran": penawaran/harga SUDAH dikirim. Tindak lanjuti keputusan customer, jawab keberatan, bantu mereka memutuskan.
+- "Follow-Up": customer perlu di-follow up. Beri dorongan halus & relevan sesuai konteks terakhir.
+Kalau ada tag lain yang tak tercantum di sini, pakai penilaianmu sendiri.
 
 GAYA: ramah, santai, profesional khas chat WA sales Indonesia (boleh sapaan "Kak"). Jangan kaku/formal. Jangan pakai nama spesifik customer (tidak tersedia).
 
