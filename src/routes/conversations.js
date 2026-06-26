@@ -238,10 +238,11 @@ router.post('/:id/messages', async (req, res) => {
       jid = `${phone}@s.whatsapp.net`;
     }
 
-    console.log(`[Send] conversation=${id} jid=${jid}`);
+    const tStart = Date.now();
 
     const sentResult = await sock.sendMessage(jid, { text: message });
     const waMessageId = sentResult?.key?.id || null;
+    const tWa = Date.now();
 
     const { data: saved, error: msgError } = await supabase
       .from('messages')
@@ -258,11 +259,14 @@ router.post('/:id/messages', async (req, res) => {
 
     if (msgError) throw msgError;
 
-    await supabase
+    // Tidak perlu menunggu update updated_at — jalankan fire-and-forget agar respons cepat
+    supabase
       .from('conversations')
       .update({ updated_at: new Date().toISOString() })
-      .eq('id', id);
+      .eq('id', id)
+      .then(() => {}, () => {});
 
+    console.log(`[Send] conv=${id} wa=${tWa - tStart}ms total=${Date.now() - tStart}ms`);
     res.json({ success: true, message: saved });
   } catch (err) {
     console.error(`POST /conversations/${req.params.id}/messages error:`, err);

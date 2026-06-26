@@ -316,45 +316,68 @@ export async function connectToWhatsApp() {
           contactName = fromMe ? null : (msg.pushName || null)
         }
 
+        const tStart = Date.now()
         const body = extractBody(msg.message)
         const timestamp = msg.messageTimestamp
         const mediaInfo = getMediaInfo(msg.message)
-        let mediaUrl = null, mediaFilename = null, mediaMimetype = null
 
-        if (mediaInfo) {
-          try {
-            const buffer = await downloadMediaMessage(
-              msg, 'buffer', {},
-              { logger: console, reuploadRequest: sock.updateMediaMessage }
-            )
-            const storageFilename = `${Date.now()}-${waMessageId}.${mediaInfo.ext}`
-            mediaMimetype = mediaInfo.msgObj.mimetype || 'application/octet-stream'
-            mediaFilename = mediaInfo.filename || storageFilename
-            mediaUrl = await uploadToStorage(buffer, storageFilename, mediaMimetype)
-          } catch (err) {
-            console.warn('[Media] Download/upload failed:', err.message)
-          }
-        }
+        // Metadata media bisa dibaca tanpa download (mimetype/nama/ext).
+        // File-nya diunduh di background supaya pesan tampil instan.
+        const mediaMimetype = mediaInfo ? (mediaInfo.msgObj.mimetype || 'application/octet-stream') : null
+        const storageFilename = mediaInfo ? `${Date.now()}-${waMessageId}.${mediaInfo.ext}` : null
+        const mediaFilename = mediaInfo ? (mediaInfo.filename || storageFilename) : null
 
         const contactId = await upsertContact(phone, contactName)
         const conversationId = await upsertConversation(contactId, jid)
+        const tDb = Date.now()
+
         const savedMessage = await saveMessage({
           conversationId, fromMe,
           body: body || (mediaInfo ? `[${mediaInfo.type}]` : '[media]'),
           timestamp, waMessageId,
           mediaType: mediaInfo?.type || null,
-          mediaUrl, mediaFilename, mediaMimetype,
+          mediaUrl: null, // menyusul via background download
+          mediaFilename, mediaMimetype,
         })
 
         const payload = { message: savedMessage, conversationId, contactId, contactName: contactName || phone, phone }
         const published = await publish('new_message', payload)
         if (!published) ioInstance?.emit('new_message', payload)
+        const tEmit = Date.now()
+        console.log(`[Recv] ${fromMe ? 'out' : 'in '} conv=${conversationId} db=${tDb - tStart}ms emit=${tEmit - tStart}ms${mediaInfo ? ` media=${mediaInfo.type}(bg)` : ''}`)
 
         supabase.from('conversations')
           .update({ updated_at: new Date().toISOString() })
           .eq('id', conversationId)
           .then(() => {}).catch(() => {})
         incrementDailyStats().catch(() => {})
+
+        // Download + upload media di background, lalu broadcast update URL-nya
+        if (mediaInfo) {
+          ;(async () => {
+            const tm0 = Date.now()
+            try {
+              const buffer = await downloadMediaMessage(
+                msg, 'buffer', {},
+                { logger: console, reuploadRequest: sock.updateMediaMessage }
+              )
+              const mediaUrl = await uploadToStorage(buffer, storageFilename, mediaMimetype)
+              if (!mediaUrl) return
+              const { data: updated } = await supabase
+                .from('messages')
+                .update({ media_url: mediaUrl })
+                .eq('id', savedMessage.id)
+                .select()
+                .single()
+              const upPayload = { message: updated || { ...savedMessage, media_url: mediaUrl }, conversationId, contactId }
+              const pub2 = await publish('message_updated', upPayload)
+              if (!pub2) ioInstance?.emit('message_updated', upPayload)
+              console.log(`[Recv] media ready conv=${conversationId} ${mediaInfo.type} in ${Date.now() - tm0}ms`)
+            } catch (err) {
+              console.warn('[Media] Background download/upload failed:', err.message)
+            }
+          })()
+        }
 
       } catch (err) {
         console.error('Error processing message:', err)
