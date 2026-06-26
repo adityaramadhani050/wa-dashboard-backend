@@ -1,14 +1,16 @@
 import { Router } from 'express';
-import Anthropic from '@anthropic-ai/sdk';
+import { GoogleGenAI } from '@google/genai';
 import { supabase } from '../db/supabase.js';
 
 const router = Router();
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+const MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 
 router.post('/suggest', async (req, res) => {
   try {
     const { conversation_id } = req.body;
     if (!conversation_id) return res.status(400).json({ error: 'conversation_id is required' });
+    if (!process.env.GEMINI_API_KEY) return res.status(500).json({ error: 'GEMINI_API_KEY belum diset di server' });
 
     const { data: messages, error: msgError } = await supabase
       .from('messages')
@@ -37,16 +39,17 @@ Gunakan daftar template pesan berikut sebagai referensi gaya/isi jika relevan, t
 ${templateRef || '(tidak ada template)'}
 Balas HANYA dengan teks saran balasan, tanpa basa-basi/penjelasan, tanpa tanda kutip pembuka.`;
 
-    const result = await anthropic.messages.create({
-      model: 'claude-opus-4-8',
-      max_tokens: 300,
-      system: systemPrompt,
-      messages: [
-        { role: 'user', content: `Riwayat chat:\n${history}\n\nBerikan satu saran balasan untuk pesan terakhir dari customer.` },
-      ],
+    const result = await ai.models.generateContent({
+      model: MODEL,
+      contents: `Riwayat chat:\n${history}\n\nBerikan satu saran balasan untuk pesan terakhir dari customer.`,
+      config: {
+        systemInstruction: systemPrompt,
+        maxOutputTokens: 500,
+        temperature: 0.7,
+      },
     });
 
-    const suggestion = result.content?.[0]?.text?.trim() || '';
+    const suggestion = (result.text || '').trim();
     res.json({ suggestion });
   } catch (err) {
     console.error('POST /ai/suggest error:', err);
