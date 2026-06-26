@@ -150,6 +150,7 @@ router.get('/agents', async (req, res) => {
       agentById[a.id] = {
         id: a.id, name: a.name, email: a.email,
         total: 0, open: 0, in_progress: 0, resolved: 0,
+        penawaran: 0, survey: 0, deal: 0,
         _responseTimes: [],
       };
     }
@@ -172,6 +173,31 @@ router.get('/agents', async (req, res) => {
       }
     }
 
+    // Funnel per agent berbasis tag (Penawaran / Survey / Deal). Lead = total percakapan.
+    const { data: tags } = await supabase.from('tags').select('id, name');
+    const stageDefs = [
+      { key: 'penawaran', re: /penawaran|quote|quotation/i },
+      { key: 'survey', re: /surv/i },
+      { key: 'deal', re: /deal|clos|menang|berhasil|won|jadi/i },
+    ];
+    const stageTagIds = {};
+    stageDefs.forEach((d) => {
+      stageTagIds[d.key] = new Set((tags || []).filter((t) => d.re.test(t.name || '')).map((t) => t.id));
+    });
+    const tagsByConv = {};
+    if (assignedConvIds.length > 0) {
+      for (let i = 0; i < assignedConvIds.length; i += 100) {
+        const batch = assignedConvIds.slice(i, i + 100);
+        const { data: ct } = await supabase
+          .from('conversation_tags')
+          .select('conversation_id, tag_id')
+          .in('conversation_id', batch);
+        (ct || []).forEach((r) => {
+          (tagsByConv[r.conversation_id] = tagsByConv[r.conversation_id] || []).push(r.tag_id);
+        });
+      }
+    }
+
     for (const conv of (convs || [])) {
       const agent = agentById[conv.assigned_to];
       if (!agent) continue;
@@ -181,6 +207,11 @@ router.get('/agents', async (req, res) => {
       if (s === 'open') agent.open++;
       else if (s === 'in_progress') agent.in_progress++;
       else if (s === 'resolved') agent.resolved++;
+
+      const ctags = tagsByConv[conv.id] || [];
+      if (ctags.some((id) => stageTagIds.penawaran.has(id))) agent.penawaran++;
+      if (ctags.some((id) => stageTagIds.survey.has(id))) agent.survey++;
+      if (ctags.some((id) => stageTagIds.deal.has(id))) agent.deal++;
 
       const msgs = msgsByConv[conv.id] || [];
       const firstIn = msgs.find(m => !m.from_me);
@@ -197,6 +228,7 @@ router.get('/agents', async (req, res) => {
       .filter(a => a.total > 0)
       .map(({ _responseTimes, ...a }) => ({
         ...a,
+        lead: a.total,
         avgResponse: _responseTimes.length > 0
           ? Math.round(_responseTimes.reduce((s, t) => s + t, 0) / _responseTimes.length)
           : null,
