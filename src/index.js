@@ -15,6 +15,7 @@ import tagsRouter from './routes/tags.js'
 import remindersRouter from './routes/reminders.js'
 import aiRouter from './routes/ai.js'
 import productsRouter from './routes/products.js'
+import devicesRouter from './routes/devices.js'
 import { requireAuth, requireAdmin } from './middleware/auth.js'
 import { subscriber, redisAvailable } from './db/redis.js'
 
@@ -83,6 +84,7 @@ app.use('/api/tags', requireAuth, tagsRouter)
 app.use('/api/reminders', requireAuth, remindersRouter)
 app.use('/api/ai', requireAuth, aiRouter)
 app.use('/api/products', requireAuth, productsRouter)
+app.use('/api/devices', requireAuth, devicesRouter)
 
 app.post('/api/wa/reset', requireAdmin, async (req, res) => {
   try {
