@@ -25,9 +25,83 @@ router.post('/suggest', async (req, res) => {
       .from('message_templates')
       .select('title, body');
 
-    // PEMBELAJARAN: ambil contoh balasan asli yang ditulis sales (from_me=true)
-    // dari berbagai percakapan, sebagai acuan gaya/pendekatan (in-context learning).
-    const { data: salesMsgs } = await supabase
+    // PEMBELAJARAN (in-context learning) — ambil contoh balasan asli sales (from_me=true)
+    // dengan PRIORITAS:
+    //   1) percakapan yang BERHASIL/closing (status resolved atau bertag deal/closing)
+    //   3) ditangani AGENT yang sama dengan chat ini
+    // Urutan tier: A=closing+agent sama, B=closing siapa saja, C=agent sama, D=terbaru global.
+
+    // agent yang menangani percakapan saat ini
+    const { data: convRow } = await supabase
+      .from('conversations')
+      .select('assigned_to')
+      .eq('id', conversation_id)
+      .maybeSingle();
+    const currentAgentId = convRow?.assigned_to || null;
+
+    // kumpulkan id percakapan "berhasil/closing": status resolved + bertag deal/closing/closed
+    const successfulIds = new Set();
+    const { data: resolvedConvs } = await supabase
+      .from('conversations')
+      .select('id')
+      .eq('status', 'resolved')
+      .order('updated_at', { ascending: false })
+      .limit(200);
+    (resolvedConvs || []).forEach((c) => successfulIds.add(c.id));
+
+    const { data: allTags } = await supabase.from('tags').select('id, name');
+    const dealTagIds = (allTags || [])
+      .filter((t) => /deal|clos|menang|berhasil|jadi|won/i.test(t.name || ''))
+      .map((t) => t.id);
+    if (dealTagIds.length) {
+      const { data: ct } = await supabase
+        .from('conversation_tags')
+        .select('conversation_id')
+        .in('tag_id', dealTagIds);
+      (ct || []).forEach((c) => successfulIds.add(c.conversation_id));
+    }
+
+    // map assigned_to untuk percakapan berhasil (untuk tahu mana yang agent-nya sama)
+    const successfulByAgent = new Set();
+    if (successfulIds.size) {
+      const { data: succRows } = await supabase
+        .from('conversations')
+        .select('id, assigned_to')
+        .in('id', [...successfulIds]);
+      (succRows || []).forEach((r) => {
+        if (currentAgentId && r.assigned_to === currentAgentId) successfulByAgent.add(r.id);
+      });
+    }
+
+    // percakapan milik agent yang sama (status apapun) untuk tier C
+    let agentConvIds = [];
+    if (currentAgentId) {
+      const { data: agentConvs } = await supabase
+        .from('conversations')
+        .select('id')
+        .eq('assigned_to', currentAgentId)
+        .order('updated_at', { ascending: false })
+        .limit(200);
+      agentConvIds = (agentConvs || []).map((c) => c.id);
+    }
+
+    const fetchSalesBodies = async (convIds, limit) => {
+      if (!convIds || !convIds.length) return [];
+      const { data } = await supabase
+        .from('messages')
+        .select('body')
+        .eq('from_me', true)
+        .not('body', 'is', null)
+        .in('conversation_id', convIds.slice(0, 100)) // batasi agar URL query tidak terlalu panjang
+        .order('timestamp', { ascending: false })
+        .limit(limit);
+      return data || [];
+    };
+
+    const tierA = await fetchSalesBodies([...successfulByAgent], 40);
+    const tierB = await fetchSalesBodies([...successfulIds], 60);
+    const tierC = await fetchSalesBodies(agentConvIds, 40);
+    const { data: tierD } = await supabase
       .from('messages')
       .select('body')
       .eq('from_me', true)
@@ -37,7 +111,7 @@ router.post('/suggest', async (req, res) => {
 
     const seenExample = new Set();
     const salesExamples = [];
-    for (const m of salesMsgs || []) {
+    for (const m of [...tierA, ...tierB, ...tierC, ...(tierD || [])]) {
       const b = (m.body || '').trim();
       if (b.length < 12 || b.length > 280) continue; // lewati yang terlalu pendek/panjang
       if (b.startsWith('[')) continue; // lewati placeholder media
@@ -48,6 +122,11 @@ router.post('/suggest', async (req, res) => {
       if (salesExamples.length >= 12) break;
     }
     const salesStyleRef = salesExamples.map((b) => `- ${b}`).join('\n');
+    const learnSourceNote = successfulByAgent.size
+      ? 'diutamakan dari percakapan yang BERHASIL closing & agent yang sama'
+      : successfulIds.size
+        ? 'diutamakan dari percakapan yang BERHASIL closing'
+        : 'dari balasan sales terbaru';
 
     const history = (messages || [])
       .reverse()
@@ -97,7 +176,7 @@ HUMANIZE — WAJIB, biar kedengaran seperti MANUSIA asli yang lagi ngetik WA, BU
 - Jangan kedengaran seperti brosur atau jawaban call center. Tulis seperti chat personal ke satu orang.
 - Pakai "Kakak/Kak" untuk customer dan "kami/kita" untuk tim — konsisten, jangan campur "Anda".
 
-BELAJAR DARI SALES ASLI — INI ACUAN PALING PENTING: berikut contoh balasan NYATA yang ditulis tim sales kami ke customer. Tirukan gaya bahasa, diksi, panjang kalimat, sapaan, dan cara mereka menawarkan/closing. Serap "rasa"-nya, JANGAN menyalin isinya mentah-mentah kalau tidak relevan dengan konteks:
+BELAJAR DARI SALES ASLI — INI ACUAN PALING PENTING: berikut contoh balasan NYATA yang ditulis tim sales kami (${learnSourceNote}). Tirukan gaya bahasa, diksi, panjang kalimat, sapaan, dan cara mereka menggali/menawarkan/closing. Serap "rasa"-nya, JANGAN menyalin isinya mentah-mentah kalau tidak relevan dengan konteks:
 ${salesStyleRef || '(belum ada contoh balasan sales)'}
 
 Referensi template pesan yang ada (acuan tambahan gaya/isi, tidak wajib dipakai literal):
