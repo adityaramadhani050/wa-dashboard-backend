@@ -53,6 +53,16 @@ Balas HANYA dengan teks saran balasan, tanpa basa-basi/penjelasan, tanpa tanda k
     res.json({ suggestion });
   } catch (err) {
     console.error('POST /ai/suggest error:', err);
+    // Deteksi limit/kuota Gemini (429 RESOURCE_EXHAUSTED)
+    const status = err?.status ?? err?.code ?? err?.response?.status;
+    const msg = String(err?.message || '');
+    const isQuota = status === 429 || /RESOURCE_EXHAUSTED|quota|rate limit/i.test(msg);
+    if (isQuota) {
+      return res.status(429).json({
+        error: 'Kuota AI sedang penuh. Tunggu sebentar lalu coba lagi.',
+        code: 'AI_QUOTA',
+      });
+    }
     res.status(500).json({ error: err.message });
   }
 });
