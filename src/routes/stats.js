@@ -209,4 +209,146 @@ router.get('/agents', async (req, res) => {
   }
 });
 
+// KPI Response Time: % percakapan yang dibalas pertama kali <= 5 menit
+router.get('/response-kpi', async (req, res) => {
+  try {
+    const KPI_MINUTES = 5;
+    const toDate = req.query.to ? new Date(req.query.to) : new Date();
+    const fromDate = req.query.from ? new Date(req.query.from) : new Date(toDate.getTime() - 29 * 86400000);
+    fromDate.setHours(0, 0, 0, 0);
+    toDate.setHours(23, 59, 59, 999);
+
+    const [{ data: agentsList }, { data: convs }] = await Promise.all([
+      supabase.from('agents').select('id, name'),
+      supabase.from('conversations')
+        .select('id, assigned_to, updated_at')
+        .gte('updated_at', fromDate.toISOString())
+        .lte('updated_at', toDate.toISOString()),
+    ]);
+
+    const agentName = {};
+    (agentsList || []).forEach((a) => { agentName[a.id] = a.name; });
+
+    const convIds = (convs || []).map((c) => c.id);
+    const assignedByConv = {};
+    (convs || []).forEach((c) => { assignedByConv[c.id] = c.assigned_to || null; });
+
+    const msgsByConv = {};
+    if (convIds.length) {
+      // Supabase .in() per batch agar URL tidak kepanjangan
+      for (let i = 0; i < convIds.length; i += 100) {
+        const batch = convIds.slice(i, i + 100);
+        const { data: msgs } = await supabase
+          .from('messages')
+          .select('conversation_id, from_me, timestamp')
+          .in('conversation_id', batch)
+          .order('timestamp', { ascending: true });
+        (msgs || []).forEach((m) => {
+          (msgsByConv[m.conversation_id] = msgsByConv[m.conversation_id] || []).push(m);
+        });
+      }
+    }
+
+    let total = 0, met = 0;
+    const perAgent = {}; // key agentId|'unassigned'
+    for (const cid of convIds) {
+      const msgs = msgsByConv[cid] || [];
+      const firstIn = msgs.find((m) => !m.from_me);
+      if (!firstIn) continue;
+      const firstOut = msgs.find((m) => m.from_me && m.timestamp > firstIn.timestamp);
+      if (!firstOut) continue;
+      const diffMin = (new Date(firstOut.timestamp) - new Date(firstIn.timestamp)) / 60000;
+      total++;
+      const ok = diffMin <= KPI_MINUTES;
+      if (ok) met++;
+      const key = assignedByConv[cid] || 'unassigned';
+      const a = (perAgent[key] = perAgent[key] || { total: 0, met: 0 });
+      a.total++; if (ok) a.met++;
+    }
+
+    const agents = Object.entries(perAgent).map(([key, v]) => ({
+      agent_id: key === 'unassigned' ? null : key,
+      name: key === 'unassigned' ? 'Belum di-assign' : (agentName[key] || 'Agent'),
+      total: v.total,
+      met: v.met,
+      percent: v.total ? Math.round((v.met / v.total) * 100) : 0,
+    })).sort((a, b) => b.total - a.total);
+
+    res.json({
+      kpiMinutes: KPI_MINUTES,
+      total,
+      met,
+      percent: total ? Math.round((met / total) * 100) : 0,
+      agents,
+    });
+  } catch (err) {
+    console.error('GET /stats/response-kpi error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Funnel konversi berbasis tag: Lead -> Penawaran -> Survey -> Deal (+ Fail)
+router.get('/funnel', async (req, res) => {
+  try {
+    const toDate = req.query.to ? new Date(req.query.to) : new Date();
+    const fromDate = req.query.from ? new Date(req.query.from) : new Date(toDate.getTime() - 29 * 86400000);
+    fromDate.setHours(0, 0, 0, 0);
+    toDate.setHours(23, 59, 59, 999);
+
+    const { data: convs } = await supabase
+      .from('conversations')
+      .select('id')
+      .gte('updated_at', fromDate.toISOString())
+      .lte('updated_at', toDate.toISOString());
+    const convIds = new Set((convs || []).map((c) => c.id));
+    const totalLeads = convIds.size;
+
+    const { data: tags } = await supabase.from('tags').select('id, name');
+    const stageDefs = [
+      { stage: 'Penawaran', re: /penawaran|quote|quotation/i },
+      { stage: 'Survey', re: /surv/i },
+      { stage: 'Deal', re: /deal|clos|menang|berhasil|won|jadi/i },
+      { stage: 'Fail', re: /fail|gagal|batal|lost/i },
+    ];
+    const stageTagIds = stageDefs.map((d) => ({
+      stage: d.stage,
+      ids: (tags || []).filter((t) => d.re.test(t.name || '')).map((t) => t.id),
+    }));
+
+    // ambil semua relasi conversation_tags untuk tag yang relevan
+    const allStageTagIds = [...new Set(stageTagIds.flatMap((s) => s.ids))];
+    let ctRows = [];
+    if (allStageTagIds.length) {
+      const { data } = await supabase
+        .from('conversation_tags')
+        .select('conversation_id, tag_id')
+        .in('tag_id', allStageTagIds);
+      ctRows = data || [];
+    }
+
+    const countStage = (ids) => {
+      if (!ids.length) return 0;
+      const set = new Set();
+      ctRows.forEach((r) => {
+        if (ids.includes(r.tag_id) && convIds.has(r.conversation_id)) set.add(r.conversation_id);
+      });
+      return set.size;
+    };
+
+    const stages = [
+      { stage: 'Lead', count: totalLeads },
+      ...stageTagIds
+        .filter((s) => s.stage !== 'Fail')
+        .map((s) => ({ stage: s.stage, count: countStage(s.ids) })),
+    ];
+    const failDef = stageTagIds.find((s) => s.stage === 'Fail');
+    const fail = failDef ? countStage(failDef.ids) : 0;
+
+    res.json({ stages, fail });
+  } catch (err) {
+    console.error('GET /stats/funnel error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;
