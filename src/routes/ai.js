@@ -25,6 +25,21 @@ router.post('/suggest', async (req, res) => {
       .from('message_templates')
       .select('title, body');
 
+    // KNOWLEDGE BASE PRODUK: katalog asli supaya AI tidak mengarang harga/spek
+    const { data: products } = await supabase
+      .from('products')
+      .select('name, category, capacity, price, specs')
+      .eq('active', true)
+      .order('created_at', { ascending: false });
+    const productRef = (products || [])
+      .map((p) => {
+        const head = [p.name, p.capacity, p.category].filter(Boolean).join(' · ');
+        const price = p.price ? ` — Harga: ${p.price}` : '';
+        const specs = p.specs ? ` — ${p.specs}` : '';
+        return `- ${head}${price}${specs}`;
+      })
+      .join('\n');
+
     // PEMBELAJARAN (in-context learning) — ambil contoh balasan asli sales (from_me=true)
     // dengan PRIORITAS:
     //   1) percakapan yang BERHASIL/closing (status resolved atau bertag deal/closing)
@@ -151,6 +166,10 @@ PENGETAHUAN PRODUK (gunakan bila relevan):
 - Jenis sistem: On-grid (hemat tagihan PLN), Off-grid (area tanpa PLN), Hybrid (gabungan + baterai cadangan saat mati lampu).
 - Nilai jual utama: hemat tagihan listrik s/d puluhan persen, balik modal (ROI) jangka menengah, ramah lingkungan, tahan 25+ tahun, ada garansi.
 - Faktor penentuan harga: kapasitas (Watt/kWp), jenis sistem, kebutuhan/tagihan listrik bulanan, lokasi & kondisi atap.
+
+KATALOG PRODUK & HARGA RESMI (SUMBER KEBENARAN — wajib dipakai untuk harga/spek):
+${productRef || '(katalog belum diisi)'}
+ATURAN HARGA: untuk menyebut harga/spesifikasi, gunakan HANYA data katalog di atas. DILARANG mengarang/menebak angka. Kalau produk yang ditanya tidak ada di katalog atau harganya butuh hitungan (tergantung kebutuhan/lokasi), JANGAN sebut angka — arahkan halus untuk digali dulu kebutuhannya atau dicek ke tim. Boleh sebut kisaran HANYA jika tertera di katalog.
 
 PENDEKATAN — CONSULTATIVE SELLING (SANGAT PENTING, jangan dilanggar):
 JANGAN buru-buru menawarkan survei/meeting/telepon. Itu adalah langkah TERAKHIR. Tujuan utamamu lebih dulu: membangun nilai, menggali kebutuhan, dan berdiskusi memberi solusi. Baca dulu posisi percakapan saat ini, lalu pilih tahap yang sesuai:

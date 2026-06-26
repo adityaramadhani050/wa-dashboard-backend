@@ -14,6 +14,7 @@ import templatesRouter from './routes/templates.js'
 import tagsRouter from './routes/tags.js'
 import remindersRouter from './routes/reminders.js'
 import aiRouter from './routes/ai.js'
+import productsRouter from './routes/products.js'
 import { subscriber, redisAvailable } from './db/redis.js'
 
 const PORT = process.env.PORT || 3000
@@ -78,6 +79,7 @@ app.use('/api/templates', templatesRouter)
 app.use('/api/tags', tagsRouter)
 app.use('/api/reminders', remindersRouter)
 app.use('/api/ai', aiRouter)
+app.use('/api/products', productsRouter)
 
 app.post('/api/wa/reset', async (req, res) => {
   try {
