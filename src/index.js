@@ -15,6 +15,7 @@ import tagsRouter from './routes/tags.js'
 import remindersRouter from './routes/reminders.js'
 import aiRouter from './routes/ai.js'
 import productsRouter from './routes/products.js'
+import { requireAuth, requireAdmin } from './middleware/auth.js'
 import { subscriber, redisAvailable } from './db/redis.js'
 
 const PORT = process.env.PORT || 3000
@@ -69,19 +70,21 @@ app.get('/health', (req, res) => {
   })
 })
 
+// /api/auth & /health terbuka. Sisanya butuh login (requireAuth).
+// Endpoint khusus admin pakai requireAdmin. Enforcement diaktifkan via AUTH_ENFORCED=true.
 app.use('/api/auth', authRouter)
-app.use('/api/conversations', conversationsRouter)
-app.use('/api/stats', statsRouter)
-app.use('/api/messages', messagesRouter)
-app.use('/api/agents', agentsRouter)
-app.use('/api/contacts', contactsRouter)
-app.use('/api/templates', templatesRouter)
-app.use('/api/tags', tagsRouter)
-app.use('/api/reminders', remindersRouter)
-app.use('/api/ai', aiRouter)
-app.use('/api/products', productsRouter)
+app.use('/api/conversations', requireAuth, conversationsRouter)
+app.use('/api/stats', requireAdmin, statsRouter)
+app.use('/api/messages', requireAuth, messagesRouter)
+app.use('/api/agents', requireAdmin, agentsRouter)
+app.use('/api/contacts', requireAuth, contactsRouter)
+app.use('/api/templates', requireAuth, templatesRouter)
+app.use('/api/tags', requireAuth, tagsRouter)
+app.use('/api/reminders', requireAuth, remindersRouter)
+app.use('/api/ai', requireAuth, aiRouter)
+app.use('/api/products', requireAuth, productsRouter)
 
-app.post('/api/wa/reset', async (req, res) => {
+app.post('/api/wa/reset', requireAdmin, async (req, res) => {
   try {
     await resetSession()
     res.json({ success: true, message: 'Session reset, scan QR to reconnect' })
