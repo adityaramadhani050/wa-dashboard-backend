@@ -346,7 +346,7 @@ export async function connectToWhatsApp() {
           mediaUrl, mediaFilename, mediaMimetype,
         })
 
-        const payload = { message: savedMessage, conversationId, contactId }
+        const payload = { message: savedMessage, conversationId, contactId, contactName: contactName || phone, phone }
         const published = await publish('new_message', payload)
         if (!published) ioInstance?.emit('new_message', payload)
 
