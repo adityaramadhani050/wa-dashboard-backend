@@ -252,4 +252,100 @@ PENTING: Balas HANYA dengan teks saran balasan siap kirim, singkat seperti yang 
   }
 });
 
+// Helper: ambil riwayat chat sebuah percakapan jadi teks "Sales/Customer: ..."
+async function getHistoryText(conversationId, limit = 30) {
+  const { data: msgs } = await supabase
+    .from('messages')
+    .select('body, from_me, timestamp')
+    .eq('conversation_id', conversationId)
+    .not('body', 'is', null)
+    .order('timestamp', { ascending: false })
+    .limit(limit);
+  return (msgs || [])
+    .reverse()
+    .map((m) => `${m.from_me ? 'Sales' : 'Customer'}: ${m.body}`)
+    .join('\n');
+}
+
+function handleAiError(err, res, label) {
+  console.error(`${label} error:`, err);
+  const status = err?.status ?? err?.code ?? err?.response?.status;
+  const msg = String(err?.message || '');
+  if (status === 429 || /RESOURCE_EXHAUSTED|quota|rate limit/i.test(msg)) {
+    return res.status(429).json({ error: 'Kuota AI sedang penuh. Tunggu sebentar lalu coba lagi.', code: 'AI_QUOTA' });
+  }
+  res.status(500).json({ error: err.message });
+}
+
+// SARAN TAG: AI usulkan tag (dari daftar tag yang ADA) untuk percakapan ini.
+// Mengembalikan tag_ids yang cocok + alasan. Tidak membuat tag baru.
+router.post('/suggest-tags', async (req, res) => {
+  try {
+    const { conversation_id } = req.body;
+    if (!conversation_id) return res.status(400).json({ error: 'conversation_id is required' });
+    if (!process.env.GEMINI_API_KEY) return res.status(500).json({ error: 'GEMINI_API_KEY belum diset di server' });
+
+    const { data: tags } = await supabase.from('tags').select('id, name');
+    if (!tags || tags.length === 0) return res.json({ tag_ids: [], reason: 'Belum ada tag yang tersedia.' });
+
+    const history = await getHistoryText(conversation_id);
+    const tagList = tags.map((t) => `- ${t.name}`).join('\n');
+
+    const result = await ai.models.generateContent({
+      model: MODEL,
+      contents: `Daftar tag yang TERSEDIA (hanya boleh pilih dari ini, jangan buat baru):\n${tagList}\n\nRiwayat chat:\n${history}\n\nPilih tag yang paling sesuai dengan kondisi percakapan ini (boleh 0, 1, atau beberapa). Kembalikan nama tag PERSIS seperti di daftar.`,
+      config: {
+        systemInstruction: 'Kamu mengklasifikasikan status percakapan sales WhatsApp PLTS dengan memilih tag yang relevan dari daftar yang diberikan. Jawab ringkas & akurat.',
+        maxOutputTokens: 300,
+        temperature: 0.3,
+        thinkingConfig: { thinkingBudget: 0 },
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: 'OBJECT',
+          properties: {
+            tags: { type: 'ARRAY', items: { type: 'STRING' } },
+            reason: { type: 'STRING' },
+          },
+          required: ['tags'],
+        },
+      },
+    });
+
+    let parsed = {};
+    try { parsed = JSON.parse(result.text || '{}'); } catch { parsed = {}; }
+    const wanted = Array.isArray(parsed.tags) ? parsed.tags.map((s) => String(s).toLowerCase().trim()) : [];
+    const matched = tags.filter((t) => wanted.includes((t.name || '').toLowerCase().trim()));
+
+    res.json({ tag_ids: matched.map((t) => t.id), tags: matched, reason: parsed.reason || '' });
+  } catch (err) {
+    handleAiError(err, res, 'POST /ai/suggest-tags');
+  }
+});
+
+// SARAN CATATAN: AI ringkas kebutuhan/poin penting customer jadi 1 catatan singkat.
+router.post('/suggest-note', async (req, res) => {
+  try {
+    const { conversation_id } = req.body;
+    if (!conversation_id) return res.status(400).json({ error: 'conversation_id is required' });
+    if (!process.env.GEMINI_API_KEY) return res.status(500).json({ error: 'GEMINI_API_KEY belum diset di server' });
+
+    const history = await getHistoryText(conversation_id);
+
+    const result = await ai.models.generateContent({
+      model: MODEL,
+      contents: `Riwayat chat:\n${history}\n\nBuat ringkasan catatan internal singkat tentang customer ini untuk tim sales.`,
+      config: {
+        systemInstruction: `Kamu membuat CATATAN INTERNAL singkat (bukan untuk dikirim ke customer) yang merangkum poin penting dari percakapan sales PLTS: kebutuhan/tujuan, kapasitas/produk yang diminati, lokasi, perkiraan tagihan listrik, keberatan/kendala, dan status terakhir. Tulis padat dalam bentuk poin atau 2-4 kalimat. Bahasa Indonesia. Kalau info belum ada, jangan mengarang — cukup tulis yang diketahui. Jawab HANYA isi catatannya.`,
+        maxOutputTokens: 400,
+        temperature: 0.5,
+        thinkingConfig: { thinkingBudget: 0 },
+      },
+    });
+
+    res.json({ note: (result.text || '').trim() });
+  } catch (err) {
+    handleAiError(err, res, 'POST /ai/suggest-note');
+  }
+});
+
 export default router;
