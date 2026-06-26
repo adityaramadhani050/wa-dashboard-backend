@@ -40,7 +40,7 @@ router.get('/', async (req, res) => {
       data.map(async (conv) => {
         const { data: lastMsg } = await supabase
           .from('messages')
-          .select('body, timestamp')
+          .select('body, timestamp, from_me')
           .eq('conversation_id', conv.id)
           .order('timestamp', { ascending: false })
           .limit(1)
@@ -54,10 +54,38 @@ router.get('/', async (req, res) => {
         if (conv.last_read_at) unreadQuery = unreadQuery.gt('timestamp', conv.last_read_at);
         const { count: unreadCount } = await unreadQuery;
 
+        // Hitung sejak kapan customer menunggu dibalas (untuk KPI response time <5 menit).
+        // awaitingSince = waktu pesan masuk pertama yang belum dibalas agent.
+        const lastFromMe = lastMsg ? !!lastMsg.from_me : null;
+        let awaitingSince = null;
+        if (lastMsg && lastMsg.from_me === false) {
+          const { data: lastReply } = await supabase
+            .from('messages')
+            .select('timestamp')
+            .eq('conversation_id', conv.id)
+            .eq('from_me', true)
+            .order('timestamp', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+          let firstUnansweredQuery = supabase
+            .from('messages')
+            .select('timestamp')
+            .eq('conversation_id', conv.id)
+            .eq('from_me', false)
+            .order('timestamp', { ascending: true })
+            .limit(1);
+          if (lastReply?.timestamp) firstUnansweredQuery = firstUnansweredQuery.gt('timestamp', lastReply.timestamp);
+          const { data: firstUnanswered } = await firstUnansweredQuery.maybeSingle();
+          awaitingSince = firstUnanswered?.timestamp || lastMsg.timestamp;
+        }
+
         return {
           ...conv,
           lastMessage: lastMsg?.body || null,
           lastMessageAt: lastMsg?.timestamp || conv.updated_at,
+          lastFromMe,
+          awaitingSince,
           tags: tagsByConversation[conv.id] || [],
           unread: (unreadCount || 0) > 0,
         };
