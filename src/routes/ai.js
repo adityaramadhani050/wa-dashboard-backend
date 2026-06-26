@@ -25,6 +25,30 @@ router.post('/suggest', async (req, res) => {
       .from('message_templates')
       .select('title, body');
 
+    // PEMBELAJARAN: ambil contoh balasan asli yang ditulis sales (from_me=true)
+    // dari berbagai percakapan, sebagai acuan gaya/pendekatan (in-context learning).
+    const { data: salesMsgs } = await supabase
+      .from('messages')
+      .select('body')
+      .eq('from_me', true)
+      .not('body', 'is', null)
+      .order('timestamp', { ascending: false })
+      .limit(80);
+
+    const seenExample = new Set();
+    const salesExamples = [];
+    for (const m of salesMsgs || []) {
+      const b = (m.body || '').trim();
+      if (b.length < 12 || b.length > 280) continue; // lewati yang terlalu pendek/panjang
+      if (b.startsWith('[')) continue; // lewati placeholder media
+      const key = b.toLowerCase();
+      if (seenExample.has(key)) continue;
+      seenExample.add(key);
+      salesExamples.push(b);
+      if (salesExamples.length >= 12) break;
+    }
+    const salesStyleRef = salesExamples.map((b) => `- ${b}`).join('\n');
+
     const history = (messages || [])
       .reverse()
       .map((m) => `${m.from_me ? 'Sales' : 'Customer'}: ${m.body}`)
@@ -45,10 +69,12 @@ PRINSIP MENJAWAB (sales expert):
 1. Jawab pertanyaan customer dengan jelas & meyakinkan.
 2. Kalau data kurang untuk kasih harga pasti (mis. belum tahu tagihan listrik/kebutuhan), GALI kebutuhan dengan 1-2 pertanyaan kualifikasi yang relevan.
 3. Tonjolkan manfaat & nilai (hemat, ROI, garansi), bukan cuma harga.
-4. SELALU akhiri dengan ajakan langkah berikut yang konkret (call-to-action): mis. tawarkan survei lokasi gratis, hitungan simulasi hemat, kirim penawaran resmi, atau jadwalkan telepon.
+4. Arahkan ke langkah berikut: PRIORITASKAN menawarkan SURVEI LOKASI GRATIS sebagai ajakan utama. JANGAN mengajak menelepon/telepon. Boleh sesekali tawarkan kirim simulasi hemat atau penawaran, tapi survei tetap diutamakan.
 5. Ciptakan urgensi yang halus & jujur bila pas (mis. promo, slot survei terbatas) — jangan memaksa atau mengarang.
 
-GAYA: ramah, santai, profesional khas chat WA sales Indonesia (boleh sapaan "Kak"). Jangan kaku/formal. Jangan pakai nama spesifik customer (tidak tersedia). Panjang ideal 2-4 kalimat — cukup lengkap tapi tidak bertele-tele.
+GAYA: ramah, santai, profesional khas chat WA sales Indonesia (boleh sapaan "Kak"). Jangan kaku/formal. Jangan pakai nama spesifik customer (tidak tersedia).
+
+PANJANG — WAJIB SINGKAT: maksimal 1-2 kalimat pendek (idealnya di bawah ~25 kata). Langsung ke inti, jangan bertele-tele. Lebih baik terlalu singkat daripada kepanjangan.
 
 HUMANIZE — WAJIB, biar kedengaran seperti MANUSIA asli yang lagi ngetik WA, BUKAN bot/AI:
 - Tulis seperti orang Indonesia ngobrol santai di WA sehari-hari. Bayangkan kamu sales beneran yang lagi pegang HP.
@@ -60,17 +86,20 @@ HUMANIZE — WAJIB, biar kedengaran seperti MANUSIA asli yang lagi ngetik WA, BU
 - Jangan kedengaran seperti brosur atau jawaban call center. Tulis seperti chat personal ke satu orang.
 - Pakai "Kakak/Kak" untuk customer dan "kami/kita" untuk tim — konsisten, jangan campur "Anda".
 
-Referensi template pesan yang ada (boleh jadi acuan gaya/isi, tidak wajib dipakai literal):
+BELAJAR DARI SALES ASLI — INI ACUAN PALING PENTING: berikut contoh balasan NYATA yang ditulis tim sales kami ke customer. Tirukan gaya bahasa, diksi, panjang kalimat, sapaan, dan cara mereka menawarkan/closing. Serap "rasa"-nya, JANGAN menyalin isinya mentah-mentah kalau tidak relevan dengan konteks:
+${salesStyleRef || '(belum ada contoh balasan sales)'}
+
+Referensi template pesan yang ada (acuan tambahan gaya/isi, tidak wajib dipakai literal):
 ${templateRef || '(tidak ada template)'}
 
-PENTING: Balas HANYA dengan teks saran balasan siap kirim, seperti yang benar-benar akan diketik sales di WA. Tanpa basa-basi, tanpa penjelasan, tanpa tanda kutip, tanpa label.`;
+PENTING: Balas HANYA dengan teks saran balasan siap kirim, singkat seperti yang benar-benar akan diketik sales di WA. Tanpa basa-basi, tanpa penjelasan, tanpa tanda kutip, tanpa label.`;
 
     const result = await ai.models.generateContent({
       model: MODEL,
-      contents: `Riwayat chat:\n${history}\n\nBerikan satu saran balasan untuk pesan terakhir dari customer yang mengarah ke closing.`,
+      contents: `Riwayat chat:\n${history}\n\nBerikan satu saran balasan SINGKAT (maks 1-2 kalimat) untuk pesan terakhir dari customer, arahkan ke survei lokasi.`,
       config: {
         systemInstruction: systemPrompt,
-        maxOutputTokens: 800,
+        maxOutputTokens: 300,
         temperature: 0.95,
         topP: 0.95,
         // Matikan "thinking" agar seluruh token output dipakai untuk jawaban
