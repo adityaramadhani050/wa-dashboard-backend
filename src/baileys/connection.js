@@ -10,6 +10,7 @@ import { supabase } from '../db/supabase.js'
 import { publish, redisAvailable } from '../db/redis.js'
 import { sendToAgents, sendToAll, isPushEnabled } from '../push/fcm.js'
 import { sendWebPushToAgents, sendWebPushToAll, isWebPushEnabled } from '../push/webpush.js'
+import { autoAssignConversation } from '../services/autoAssign.js'
 import QRCode from 'qrcode'
 import fs from 'fs/promises'
 import path from 'path'
@@ -396,8 +397,13 @@ export async function connectToWhatsApp() {
           .then(() => {}).catch(() => {})
         incrementDailyStats().catch(() => {})
 
-        // Push notification (FCM) ke HP agent — hanya pesan masuk dari customer
-        if (!fromMe) pushNewMessage(payload).catch(() => {})
+        // Auto-assign (bila aktif) lalu push — supaya agent yang baru di-assign
+        // langsung menerima notifikasi. Non-blocking terhadap alur utama.
+        if (!fromMe) {
+          autoAssignConversation(conversationId)
+            .catch(() => null)
+            .finally(() => { pushNewMessage(payload).catch(() => {}) })
+        }
 
         // Download + upload media di background, lalu broadcast update URL-nya
         if (mediaInfo) {

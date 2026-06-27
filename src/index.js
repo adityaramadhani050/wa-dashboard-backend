@@ -16,6 +16,7 @@ import remindersRouter from './routes/reminders.js'
 import aiRouter from './routes/ai.js'
 import productsRouter from './routes/products.js'
 import devicesRouter from './routes/devices.js'
+import settingsRouter from './routes/settings.js'
 import { requireAuth, requireAdmin } from './middleware/auth.js'
 import { getVapidPublicKey, isWebPushEnabled } from './push/webpush.js'
 import { isPushEnabled } from './push/fcm.js'
@@ -94,6 +95,7 @@ app.use('/api/reminders', requireAuth, remindersRouter)
 app.use('/api/ai', requireAuth, aiRouter)
 app.use('/api/products', requireAuth, productsRouter)
 app.use('/api/devices', requireAuth, devicesRouter)
+app.use('/api/settings', requireAuth, settingsRouter)
 
 app.post('/api/wa/reset', requireAdmin, async (req, res) => {
   try {
