@@ -196,8 +196,10 @@ async function incrementDailyStats() {
   }
 }
 
-// Kirim push FCM untuk pesan masuk baru. Target: agent yang menangani
-// percakapan; kalau belum di-assign, kirim ke semua device terdaftar.
+// Kirim push untuk pesan masuk baru.
+// Aturan: ADMIN selalu dapat notifikasi semua chat; AGENT hanya dapat
+// notifikasi chat yang di-assign ke dirinya. Chat tanpa admin sama sekali
+// (edge case) -> kirim ke semua device.
 async function pushNewMessage(payload) {
   if (!isPushEnabled() && !isWebPushEnabled()) return
   const { conversationId, contactName, phone, message } = payload
