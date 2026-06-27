@@ -63,6 +63,17 @@ export async function sendToAgent(agentId, payload) {
   await sendToTokens((data || []).map((d) => d.token), payload);
 }
 
+// Kirim push ke beberapa agent sekaligus (device native)
+export async function sendToAgents(agentIds, payload) {
+  if (!init() || !agentIds?.length) return;
+  const { data } = await supabase
+    .from('device_tokens')
+    .select('token')
+    .in('agent_id', agentIds)
+    .neq('platform', 'web');
+  await sendToTokens((data || []).map((d) => d.token), payload);
+}
+
 // Kirim push ke semua device native terdaftar (mis. percakapan belum di-assign)
 export async function sendToAll(payload) {
   if (!init()) return;

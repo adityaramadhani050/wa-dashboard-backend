@@ -8,8 +8,8 @@ import makeWASocket, {
 import { Boom } from '@hapi/boom'
 import { supabase } from '../db/supabase.js'
 import { publish, redisAvailable } from '../db/redis.js'
-import { sendToAgent, sendToAll, isPushEnabled } from '../push/fcm.js'
-import { sendWebPushToAgent, sendWebPushToAll, isWebPushEnabled } from '../push/webpush.js'
+import { sendToAgents, sendToAll, isPushEnabled } from '../push/fcm.js'
+import { sendWebPushToAgents, sendWebPushToAll, isWebPushEnabled } from '../push/webpush.js'
 import QRCode from 'qrcode'
 import fs from 'fs/promises'
 import path from 'path'
@@ -210,11 +210,20 @@ async function pushNewMessage(payload) {
       .select('assigned_to')
       .eq('id', conversationId)
       .maybeSingle()
-    console.log(`[Push] new message conv=${conversationId} assigned_to=${conv?.assigned_to || '(unassigned)'}`)
-    if (conv?.assigned_to) {
+
+    // Target notifikasi: agent yang menangani + SEMUA admin (admin memantau semua chat).
+    const ids = new Set()
+    if (conv?.assigned_to) ids.add(conv.assigned_to)
+    const { data: admins } = await supabase.from('agents').select('id').eq('role', 'admin')
+    ;(admins || []).forEach((a) => ids.add(a.id))
+    const targetIds = [...ids]
+
+    console.log(`[Push] new message conv=${conversationId} assigned_to=${conv?.assigned_to || '(unassigned)'} targets=${targetIds.length || 'ALL'}`)
+
+    if (targetIds.length) {
       await Promise.all([
-        sendToAgent(conv.assigned_to, { title, body, data }),       // FCM (Android)
-        sendWebPushToAgent(conv.assigned_to, { title, body, data }), // Web Push (PWA)
+        sendToAgents(targetIds, { title, body, data }),       // FCM (Android)
+        sendWebPushToAgents(targetIds, { title, body, data }), // Web Push (PWA)
       ])
     } else {
       await Promise.all([

@@ -70,6 +70,17 @@ export async function sendWebPushToAgent(agentId, payload) {
   await sendToSubs(data || [], payload, `agent=${agentId}`);
 }
 
+// Kirim web push ke beberapa agent sekaligus
+export async function sendWebPushToAgents(agentIds, payload) {
+  if (!init() || !agentIds?.length) return;
+  const { data } = await supabase
+    .from('device_tokens')
+    .select('token')
+    .in('agent_id', agentIds)
+    .eq('platform', 'web');
+  await sendToSubs(data || [], payload, `agents=[${agentIds.length}]`);
+}
+
 // Kirim web push ke semua langganan web (mis. percakapan belum di-assign)
 export async function sendWebPushToAll(payload) {
   if (!init()) return;
