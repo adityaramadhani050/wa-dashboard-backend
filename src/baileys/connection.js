@@ -210,6 +210,7 @@ async function pushNewMessage(payload) {
       .select('assigned_to')
       .eq('id', conversationId)
       .maybeSingle()
+    console.log(`[Push] new message conv=${conversationId} assigned_to=${conv?.assigned_to || '(unassigned)'}`)
     if (conv?.assigned_to) {
       await Promise.all([
         sendToAgent(conv.assigned_to, { title, body, data }),       // FCM (Android)
