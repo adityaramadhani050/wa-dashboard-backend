@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { supabase } from '../db/supabase.js';
-import { getSock } from '../baileys/connection.js';
+import { getSock, broadcast } from '../baileys/connection.js';
 
 const router = Router();
 
@@ -265,6 +265,9 @@ router.post('/:id/messages', async (req, res) => {
       .update({ updated_at: new Date().toISOString() })
       .eq('id', id)
       .then(() => {}, () => {});
+
+    // Broadcast balasan agar list chat & tab lain langsung update (lastFromMe=true)
+    broadcast('new_message', { message: saved, conversationId: id }).catch(() => {});
 
     console.log(`[Send] conv=${id} wa=${tWa - tStart}ms total=${Date.now() - tStart}ms`);
     res.json({ success: true, message: saved });

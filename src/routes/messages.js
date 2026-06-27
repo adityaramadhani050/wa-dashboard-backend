@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import multer from 'multer';
-import { getSock } from '../baileys/connection.js';
+import { getSock, broadcast } from '../baileys/connection.js';
 import { supabase } from '../db/supabase.js';
 
 const router = Router();
@@ -125,6 +125,7 @@ router.post('/send-media', upload.single('file'), async (req, res) => {
       .update({ updated_at: new Date().toISOString() })
       .eq('id', conversation_id);
 
+    broadcast('new_message', { message: saved, conversationId: conversation_id }).catch(() => {});
     res.json({ success: true, message: saved });
   } catch (err) {
     console.error('POST /messages/send-media error:', err);
@@ -279,6 +280,7 @@ router.post('/send-quick-media', async (req, res) => {
       .update({ updated_at: new Date().toISOString() })
       .eq('id', conversation_id);
 
+    broadcast('new_message', { message: saved, conversationId: conversation_id }).catch(() => {});
     res.json({ success: true, message: saved });
   } catch (err) {
     console.error('POST /messages/send-quick-media error:', err);

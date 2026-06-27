@@ -29,6 +29,12 @@ export function setIO(io) { ioInstance = io }
 export function getSock() { return sock }
 export function getIsConnected() { return isConnected }
 
+// Broadcast event ke semua dashboard (Redis pub/sub + fallback Socket.io langsung)
+export async function broadcast(channel, data) {
+  const published = await publish(channel, data)
+  if (!published) ioInstance?.emit(channel, data)
+}
+
 async function clearAuthFolder() {
   try {
     await fs.rm(AUTH_FOLDER, { recursive: true, force: true })
