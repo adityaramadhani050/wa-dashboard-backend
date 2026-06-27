@@ -259,10 +259,10 @@ router.post('/:id/messages', async (req, res) => {
 
     if (msgError) throw msgError;
 
-    // Tidak perlu menunggu update updated_at — jalankan fire-and-forget agar respons cepat
+    // Agent membalas -> chat jadi "Aktif" (in_progress). Fire-and-forget.
     supabase
       .from('conversations')
-      .update({ updated_at: new Date().toISOString() })
+      .update({ status: 'in_progress', updated_at: new Date().toISOString() })
       .eq('id', id)
       .then(() => {}, () => {});
 

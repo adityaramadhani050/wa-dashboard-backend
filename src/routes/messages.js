@@ -45,7 +45,7 @@ router.post('/send', async (req, res) => {
         .insert({ conversation_id, from_me: true, body: message, timestamp: new Date().toISOString() })
         .select().single();
       if (error) throw error;
-      await supabase.from('conversations').update({ updated_at: new Date().toISOString() }).eq('id', conversation_id);
+      await supabase.from('conversations').update({ status: 'in_progress', updated_at: new Date().toISOString() }).eq('id', conversation_id);
       return res.json({ success: true, message: saved });
     }
     res.json({ success: true });
@@ -122,7 +122,7 @@ router.post('/send-media', upload.single('file'), async (req, res) => {
     if (error) throw error;
 
     await supabase.from('conversations')
-      .update({ updated_at: new Date().toISOString() })
+      .update({ status: 'in_progress', updated_at: new Date().toISOString() })
       .eq('id', conversation_id);
 
     broadcast('new_message', { message: saved, conversationId: conversation_id }).catch(() => {});
@@ -277,7 +277,7 @@ router.post('/send-quick-media', async (req, res) => {
     if (error) throw error;
 
     await supabase.from('conversations')
-      .update({ updated_at: new Date().toISOString() })
+      .update({ status: 'in_progress', updated_at: new Date().toISOString() })
       .eq('id', conversation_id);
 
     broadcast('new_message', { message: saved, conversationId: conversation_id }).catch(() => {});
