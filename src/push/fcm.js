@@ -55,13 +55,20 @@ async function sendToTokens(tokens, { title, body, data }) {
 // Kirim push ke 1 agent (semua device-nya)
 export async function sendToAgent(agentId, payload) {
   if (!init() || !agentId) return;
-  const { data } = await supabase.from('device_tokens').select('token').eq('agent_id', agentId);
+  const { data } = await supabase
+    .from('device_tokens')
+    .select('token')
+    .eq('agent_id', agentId)
+    .neq('platform', 'web'); // 'web' ditangani web-push, bukan FCM
   await sendToTokens((data || []).map((d) => d.token), payload);
 }
 
-// Kirim push ke semua device terdaftar (mis. percakapan belum di-assign)
+// Kirim push ke semua device native terdaftar (mis. percakapan belum di-assign)
 export async function sendToAll(payload) {
   if (!init()) return;
-  const { data } = await supabase.from('device_tokens').select('token');
+  const { data } = await supabase
+    .from('device_tokens')
+    .select('token')
+    .neq('platform', 'web');
   await sendToTokens((data || []).map((d) => d.token), payload);
 }

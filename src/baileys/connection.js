@@ -9,6 +9,7 @@ import { Boom } from '@hapi/boom'
 import { supabase } from '../db/supabase.js'
 import { publish, redisAvailable } from '../db/redis.js'
 import { sendToAgent, sendToAll, isPushEnabled } from '../push/fcm.js'
+import { sendWebPushToAgent, sendWebPushToAll, isWebPushEnabled } from '../push/webpush.js'
 import QRCode from 'qrcode'
 import fs from 'fs/promises'
 import path from 'path'
@@ -198,7 +199,7 @@ async function incrementDailyStats() {
 // Kirim push FCM untuk pesan masuk baru. Target: agent yang menangani
 // percakapan; kalau belum di-assign, kirim ke semua device terdaftar.
 async function pushNewMessage(payload) {
-  if (!isPushEnabled()) return
+  if (!isPushEnabled() && !isWebPushEnabled()) return
   const { conversationId, contactName, phone, message } = payload
   const title = contactName || phone || 'Pesan baru'
   const body = message?.body || 'Pesan baru masuk'
@@ -209,8 +210,17 @@ async function pushNewMessage(payload) {
       .select('assigned_to')
       .eq('id', conversationId)
       .maybeSingle()
-    if (conv?.assigned_to) await sendToAgent(conv.assigned_to, { title, body, data })
-    else await sendToAll({ title, body, data })
+    if (conv?.assigned_to) {
+      await Promise.all([
+        sendToAgent(conv.assigned_to, { title, body, data }),       // FCM (Android)
+        sendWebPushToAgent(conv.assigned_to, { title, body, data }), // Web Push (PWA)
+      ])
+    } else {
+      await Promise.all([
+        sendToAll({ title, body, data }),
+        sendWebPushToAll({ title, body, data }),
+      ])
+    }
   } catch (e) {
     console.warn('[Push] pushNewMessage gagal:', e.message)
   }

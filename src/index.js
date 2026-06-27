@@ -17,6 +17,7 @@ import aiRouter from './routes/ai.js'
 import productsRouter from './routes/products.js'
 import devicesRouter from './routes/devices.js'
 import { requireAuth, requireAdmin } from './middleware/auth.js'
+import { getVapidPublicKey } from './push/webpush.js'
 import { subscriber, redisAvailable } from './db/redis.js'
 
 const PORT = process.env.PORT || 3000
@@ -61,6 +62,11 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
 }))
 app.use(express.json())
+
+// VAPID public key untuk web push (terbuka — bukan rahasia)
+app.get('/api/push/vapid-public-key', (req, res) => {
+  res.json({ key: getVapidPublicKey() })
+})
 
 app.get('/health', (req, res) => {
   res.json({
