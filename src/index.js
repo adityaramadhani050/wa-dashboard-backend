@@ -40,7 +40,7 @@ const io = new Server(httpServer, {
 
 setIO(io)
 
-const REDIS_CHANNELS = ['new_message', 'message_status', 'message_updated']
+const REDIS_CHANNELS = ['new_message', 'message_status', 'message_updated', 'conversation_assigned']
 
 if (redisAvailable && subscriber) {
   subscriber.subscribe(...REDIS_CHANNELS, (err) => {

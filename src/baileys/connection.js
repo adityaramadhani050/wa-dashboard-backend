@@ -401,6 +401,14 @@ export async function connectToWhatsApp() {
         // langsung menerima notifikasi. Non-blocking terhadap alur utama.
         if (!fromMe) {
           autoAssignConversation(conversationId)
+            .then(async (agent) => {
+              if (agent) {
+                // Broadcast assignment baru supaya badge agent muncul realtime
+                const ap = { conversationId, agent }
+                const pub = await publish('conversation_assigned', ap)
+                if (!pub) ioInstance?.emit('conversation_assigned', ap)
+              }
+            })
             .catch(() => null)
             .finally(() => { pushNewMessage(payload).catch(() => {}) })
         }

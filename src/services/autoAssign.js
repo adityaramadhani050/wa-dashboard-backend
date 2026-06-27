@@ -62,18 +62,18 @@ export async function autoAssignConversation(conversationId) {
 
   const loads = sortByLoad(await agentLoads());
   if (!loads.length) return null;
-  const agentId = loads[0].id;
+  const agent = loads[0];
 
   // Guard .is('assigned_to', null) mencegah balapan double-assign
   const { data: updated } = await supabase
     .from('conversations')
-    .update({ assigned_to: agentId, updated_at: new Date().toISOString() })
+    .update({ assigned_to: agent.id, updated_at: new Date().toISOString() })
     .eq('id', conversationId)
     .is('assigned_to', null)
     .select('id')
     .maybeSingle();
 
-  return updated ? agentId : null;
+  return updated ? { id: agent.id, name: agent.name } : null;
 }
 
 // Saat fitur diaktifkan: bagikan SEMUA percakapan unassigned aktif secara seimbang
