@@ -403,12 +403,20 @@ export async function connectToWhatsApp() {
           .then(() => {}).catch(() => {})
         incrementDailyStats().catch(() => {})
 
-        // Pesan masuk dari customer pada chat yang sudah "Resolve" -> reaktivasi jadi "Open"
+        // Pesan masuk pada chat "Resolved" -> reaktivasi: "Aktif" bila masih
+        // di-assign ke agent, atau "Open" bila belum di-assign.
         if (!fromMe) {
+          supabase.from('conversations')
+            .update({ status: 'in_progress' })
+            .eq('id', conversationId)
+            .eq('status', 'resolved')
+            .not('assigned_to', 'is', null)
+            .then(() => {}, () => {})
           supabase.from('conversations')
             .update({ status: 'open' })
             .eq('id', conversationId)
             .eq('status', 'resolved')
+            .is('assigned_to', null)
             .then(() => {}, () => {})
         }
 

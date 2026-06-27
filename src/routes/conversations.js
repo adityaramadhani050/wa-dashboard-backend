@@ -174,9 +174,11 @@ router.post('/:id/assign', async (req, res) => {
     const { agent_id } = req.body;
     if (!agent_id) return res.status(400).json({ error: 'agent_id is required' });
 
+    // Di-assign ke agent -> chat jadi "Aktif" (kecuali sudah resolved tetap dihormati?
+    // tetap set in_progress karena agent kini menangani).
     const { data, error } = await supabase
       .from('conversations')
-      .update({ assigned_to: agent_id, updated_at: new Date().toISOString() })
+      .update({ assigned_to: agent_id, status: 'in_progress', updated_at: new Date().toISOString() })
       .eq('id', id)
       .select(`*, contact:contacts (id, phone, name), agents:assigned_to (id, name, email, role)`)
       .single();

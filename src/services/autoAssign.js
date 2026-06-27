@@ -64,10 +64,11 @@ export async function autoAssignConversation(conversationId) {
   if (!loads.length) return null;
   const agent = loads[0];
 
-  // Guard .is('assigned_to', null) mencegah balapan double-assign
+  // Guard .is('assigned_to', null) mencegah balapan double-assign.
+  // Di-assign -> langsung "Aktif" (in_progress).
   const { data: updated } = await supabase
     .from('conversations')
-    .update({ assigned_to: agent.id, updated_at: new Date().toISOString() })
+    .update({ assigned_to: agent.id, status: 'in_progress', updated_at: new Date().toISOString() })
     .eq('id', conversationId)
     .is('assigned_to', null)
     .select('id')
@@ -94,7 +95,7 @@ export async function distributeUnassigned() {
     const target = loads[0];
     const { data: updated } = await supabase
       .from('conversations')
-      .update({ assigned_to: target.id, updated_at: new Date().toISOString() })
+      .update({ assigned_to: target.id, status: 'in_progress', updated_at: new Date().toISOString() })
       .eq('id', conv.id)
       .is('assigned_to', null)
       .select('id')
