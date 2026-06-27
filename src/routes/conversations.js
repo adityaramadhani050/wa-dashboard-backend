@@ -184,6 +184,15 @@ router.post('/:id/assign', async (req, res) => {
       .single();
 
     if (error) throw error;
+
+    // Broadcast assignment supaya list chat semua dashboard update realtime
+    if (data?.agents) {
+      broadcast('conversation_assigned', {
+        conversationId: id,
+        agent: { id: data.agents.id, name: data.agents.name },
+      }).catch(() => {});
+    }
+
     res.json(data);
   } catch (err) {
     res.status(500).json({ error: err.message });
