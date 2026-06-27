@@ -7,39 +7,45 @@ const router = Router();
 // Also upserts each day's stats into daily_stats table
 router.get('/daily', async (req, res) => {
   try {
-    // Default: last 14 days
-    const toDate = req.query.to
-      ? new Date(req.query.to)
-      : new Date();
-    const fromDate = req.query.from
-      ? new Date(req.query.from)
-      : new Date(toDate.getTime() - 13 * 86400000);
+    // Bucketing pakai zona WIB (UTC+7) supaya batas hari sesuai waktu lokal user
+    const TZ = 7 * 3600 * 1000;
+    const wibKey = (iso) => {
+      if (!iso) return null;
+      const t = new Date(iso).getTime();
+      if (Number.isNaN(t)) return null;
+      return new Date(t + TZ).toISOString().slice(0, 10);
+    };
 
-    fromDate.setHours(0, 0, 0, 0);
-    toDate.setHours(23, 59, 59, 999);
+    const todayWib = new Date(Date.now() + TZ).toISOString().slice(0, 10);
+    const toStr = req.query.to || todayWib;
+    const fromStr = req.query.from ||
+      new Date(new Date(toStr + 'T00:00:00Z').getTime() - 13 * 86400000).toISOString().slice(0, 10);
 
-    const diffDays = Math.round((toDate - fromDate) / 86400000) + 1;
+    // Batas UTC yang mencakup rentang hari WIB
+    const qFromIso = new Date(fromStr + 'T00:00:00+07:00').toISOString();
+    const qToIso = new Date(toStr + 'T23:59:59+07:00').toISOString();
 
     const { data: messages, error } = await supabase
       .from('messages')
       .select('timestamp, from_me')
-      .gte('timestamp', fromDate.toISOString())
-      .lte('timestamp', toDate.toISOString());
+      .gte('timestamp', qFromIso)
+      .lte('timestamp', qToIso);
 
     if (error) throw error;
 
-    // Build date map with gap filling
+    // Bangun daftar hari (WIB) inklusif dari fromStr..toStr
     const byDate = {};
-    for (let i = 0; i < diffDays; i++) {
-      const d = new Date(fromDate);
-      d.setDate(d.getDate() + i);
-      const key = d.toISOString().split('T')[0];
+    let cursor = new Date(fromStr + 'T00:00:00Z');
+    const end = new Date(toStr + 'T00:00:00Z');
+    while (cursor <= end) {
+      const key = cursor.toISOString().slice(0, 10);
       byDate[key] = { date: key, messages: 0, incoming: 0, outgoing: 0 };
+      cursor = new Date(cursor.getTime() + 86400000);
     }
 
     for (const msg of messages) {
-      const key = (msg.timestamp || '').split('T')[0];
-      if (!byDate[key]) continue;
+      const key = wibKey(msg.timestamp);
+      if (!key || !byDate[key]) continue;
       byDate[key].messages++;
       if (msg.from_me) byDate[key].outgoing++;
       else byDate[key].incoming++;
@@ -47,30 +53,29 @@ router.get('/daily', async (req, res) => {
 
     const result = Object.values(byDate);
 
-    // Upsert each day into daily_stats (save to DB)
-    // Get new contacts and resolved per day
+    // Kontak baru & resolved per hari (WIB)
     const { data: contacts } = await supabase
       .from('contacts')
       .select('created_at')
-      .gte('created_at', fromDate.toISOString())
-      .lte('created_at', toDate.toISOString());
+      .gte('created_at', qFromIso)
+      .lte('created_at', qToIso);
 
     const { data: resolved } = await supabase
       .from('conversations')
       .select('updated_at')
       .eq('status', 'resolved')
-      .gte('updated_at', fromDate.toISOString())
-      .lte('updated_at', toDate.toISOString());
+      .gte('updated_at', qFromIso)
+      .lte('updated_at', qToIso);
 
     const contactsByDate = {};
     for (const c of (contacts || [])) {
-      const key = (c.created_at || '').split('T')[0];
-      contactsByDate[key] = (contactsByDate[key] || 0) + 1;
+      const key = wibKey(c.created_at);
+      if (key) contactsByDate[key] = (contactsByDate[key] || 0) + 1;
     }
     const resolvedByDate = {};
     for (const c of (resolved || [])) {
-      const key = (c.updated_at || '').split('T')[0];
-      resolvedByDate[key] = (resolvedByDate[key] || 0) + 1;
+      const key = wibKey(c.updated_at);
+      if (key) resolvedByDate[key] = (resolvedByDate[key] || 0) + 1;
     }
 
     // Upsert into daily_stats for each day in range

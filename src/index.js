@@ -17,7 +17,8 @@ import aiRouter from './routes/ai.js'
 import productsRouter from './routes/products.js'
 import devicesRouter from './routes/devices.js'
 import { requireAuth, requireAdmin } from './middleware/auth.js'
-import { getVapidPublicKey } from './push/webpush.js'
+import { getVapidPublicKey, isWebPushEnabled } from './push/webpush.js'
+import { isPushEnabled } from './push/fcm.js'
 import { subscriber, redisAvailable } from './db/redis.js'
 
 const PORT = process.env.PORT || 3000
@@ -73,6 +74,8 @@ app.get('/health', (req, res) => {
     status: 'ok',
     wa_connected: getIsConnected(),
     redis: redisAvailable,
+    web_push: isWebPushEnabled(),   // true bila VAPID env terpasang
+    fcm_push: isPushEnabled(),      // true bila FIREBASE_SERVICE_ACCOUNT terpasang
     timestamp: new Date().toISOString(),
   })
 })
