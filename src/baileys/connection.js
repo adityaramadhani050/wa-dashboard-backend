@@ -340,7 +340,10 @@ export async function connectToWhatsApp() {
   })
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return
+    // 'notify' = pesan live; 'append' = pesan menyusul saat reconnect (offline/sinkron).
+    // Keduanya diproses agar pesan yang masuk saat WA sempat disconnect tetap tersimpan.
+    if (type !== 'notify' && type !== 'append') return
+    const isLive = type === 'notify'
 
     for (const msg of messages) {
       try {
@@ -365,6 +368,13 @@ export async function connectToWhatsApp() {
           const { data: dup } = await supabase
             .from('messages').select('id').eq('wa_message_id', waMessageId).maybeSingle()
           if (dup) continue
+        }
+
+        // Untuk pesan menyusul (append/sinkron), batasi hanya yang masih baru
+        // (<=7 hari) supaya tidak mengimpor riwayat lama secara massal.
+        if (!isLive) {
+          const tsMs = Number(msg.messageTimestamp || 0) * 1000
+          if (tsMs && (Date.now() - tsMs) > 7 * 24 * 60 * 60 * 1000) continue
         }
 
         let phone, contactName
@@ -450,7 +460,8 @@ export async function connectToWhatsApp() {
               }
             })
             .catch(() => null)
-            .finally(() => { pushNewMessage(payload).catch(() => {}) })
+            // Push hanya untuk pesan live; batch saat reconnect tidak spam notifikasi
+            .finally(() => { if (isLive) pushNewMessage(payload).catch(() => {}) })
         }
 
         // Download + upload media di background, lalu broadcast update URL-nya
