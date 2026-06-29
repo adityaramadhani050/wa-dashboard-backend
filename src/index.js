@@ -3,7 +3,7 @@ import express from 'express'
 import { createServer } from 'http'
 import { Server } from 'socket.io'
 import cors from 'cors'
-import { connectToWhatsApp, setIO, getSock, getIsConnected, resetSession } from './baileys/connection.js'
+import { connectToWhatsApp, setIO, getSock, getIsConnected, resetSession, triggerSync, getSyncing } from './baileys/connection.js'
 import conversationsRouter from './routes/conversations.js'
 import statsRouter from './routes/stats.js'
 import messagesRouter from './routes/messages.js'
@@ -98,6 +98,15 @@ app.use('/api/products', requireAuth, productsRouter)
 app.use('/api/devices', requireAuth, devicesRouter)
 app.use('/api/settings', requireAuth, settingsRouter)
 
+app.post('/api/wa/sync', requireAuth, async (req, res) => {
+  try {
+    const r = await triggerSync()
+    res.json({ ...r, syncing: getSyncing() })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 app.post('/api/wa/reset', requireAdmin, async (req, res) => {
   try {
     await resetSession()
@@ -110,6 +119,7 @@ app.post('/api/wa/reset', requireAdmin, async (req, res) => {
 io.on('connection', (socket) => {
   console.log('Dashboard client connected:', socket.id, '| transport:', socket.conn.transport.name)
   socket.emit('wa_status', { connected: getIsConnected() })
+  socket.emit('wa_sync', { syncing: getSyncing() })
   socket.on('disconnect', () => {
     console.log('Dashboard client disconnected:', socket.id)
   })

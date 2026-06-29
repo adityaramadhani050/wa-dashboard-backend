@@ -22,12 +22,40 @@ const AUTH_FOLDER = path.join(__dirname, '../../.wa_auth')
 let sock = null
 let ioInstance = null
 let isConnected = false
+let syncing = false
 
 const lidToPhone = new Map()
 
 export function setIO(io) { ioInstance = io }
 export function getSock() { return sock }
 export function getIsConnected() { return isConnected }
+export function getSyncing() { return syncing }
+
+function setSyncing(val) {
+  syncing = val
+  ioInstance?.emit('wa_sync', { syncing: val })
+}
+
+// Sinkronisasi manual: reconnect socket (tanpa logout) supaya WhatsApp
+// mengirim ulang pesan yang masuk saat sempat disconnect.
+export async function triggerSync() {
+  if (syncing) return { ok: true, already: true }
+  setSyncing(true)
+  // Safety: matikan indikator kalau 'open' tak kunjung datang
+  setTimeout(() => { if (syncing) setSyncing(false) }, 25000)
+  try {
+    if (sock) {
+      try { sock.end(new Error('manual-sync-reconnect')) } catch {}
+      // 'close' handler akan reconnect otomatis (sesi dipertahankan)
+    } else {
+      connectToWhatsApp()
+    }
+  } catch (e) {
+    setSyncing(false)
+    throw e
+  }
+  return { ok: true }
+}
 
 // Broadcast event ke semua dashboard (Redis pub/sub + fallback Socket.io langsung)
 export async function broadcast(channel, data) {
@@ -336,6 +364,8 @@ export async function connectToWhatsApp() {
       console.log('WhatsApp connected!')
       isConnected = true
       ioInstance?.emit('wa_status', { connected: true })
+      // Bila sedang sinkronisasi manual, beri waktu pesan offline mengalir lalu matikan indikator
+      if (syncing) setTimeout(() => setSyncing(false), 8000)
     }
 
     if (connection === 'close') {
