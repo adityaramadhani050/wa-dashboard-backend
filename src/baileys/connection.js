@@ -55,6 +55,18 @@ export async function resetSession() {
   setTimeout(() => connectToWhatsApp(), 500)
 }
 
+// Mutex sederhana per-nomor (antrian promise) supaya upsert kontak/percakapan
+// untuk nomor yang sama tidak balapan -> mencegah duplikat percakapan.
+const phoneLocks = new Map()
+function withPhoneLock(key, fn) {
+  const prev = phoneLocks.get(key) || Promise.resolve()
+  const run = prev.then(fn, fn) // jalankan fn setelah antrian sebelumnya selesai
+  const tail = run.then(() => {}, () => {}) // ekor yang tak pernah reject untuk dirantai
+  phoneLocks.set(key, tail)
+  tail.then(() => { if (phoneLocks.get(key) === tail) phoneLocks.delete(key) })
+  return run
+}
+
 function resolvePhone(jid) {
   const raw = jid.split('@')[0]
   if (!jid.endsWith('@lid')) return raw
@@ -378,8 +390,13 @@ export async function connectToWhatsApp() {
         const storageFilename = mediaInfo ? `${Date.now()}-${waMessageId}.${mediaInfo.ext}` : null
         const mediaFilename = mediaInfo ? (mediaInfo.filename || storageFilename) : null
 
-        const contactId = await upsertContact(phone, contactName)
-        const conversationId = await upsertConversation(contactId, jid)
+        // Serialize per nomor: cegah balapan yang bikin 1 kontak punya banyak
+        // percakapan saat pesan datang beruntun (burst).
+        const { contactId, conversationId } = await withPhoneLock(phone, async () => {
+          const cId = await upsertContact(phone, contactName)
+          const convId = await upsertConversation(cId, jid)
+          return { contactId: cId, conversationId: convId }
+        })
         const tDb = Date.now()
 
         const savedMessage = await saveMessage({
