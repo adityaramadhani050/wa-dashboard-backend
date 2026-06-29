@@ -73,6 +73,16 @@ function resolvePhone(jid) {
   return lidToPhone.get(raw) || raw
 }
 
+// Ambil contextInfo (info reply/quote) dari berbagai tipe pesan
+function getContextInfo(message) {
+  if (!message) return null
+  for (const k of Object.keys(message)) {
+    const v = message[k]
+    if (v && typeof v === 'object' && v.contextInfo) return v.contextInfo
+  }
+  return null
+}
+
 function extractBody(message) {
   if (!message) return null
   return (
@@ -184,7 +194,7 @@ async function upsertConversation(contactId, waJid) {
   return data.id
 }
 
-async function saveMessage({ conversationId, fromMe, body, timestamp, waMessageId, mediaType, mediaUrl, mediaFilename, mediaMimetype }) {
+async function saveMessage({ conversationId, fromMe, body, timestamp, waMessageId, mediaType, mediaUrl, mediaFilename, mediaMimetype, replyToWaId, replyToBody, replyToFromMe }) {
   const { data, error } = await supabase
     .from('messages')
     .insert({
@@ -198,6 +208,9 @@ async function saveMessage({ conversationId, fromMe, body, timestamp, waMessageI
       media_url: mediaUrl || null,
       media_filename: mediaFilename || null,
       media_mimetype: mediaMimetype || null,
+      reply_to_wa_id: replyToWaId || null,
+      reply_to_body: replyToBody || null,
+      reply_to_from_me: replyToFromMe ?? null,
     })
     .select()
     .single()
@@ -394,6 +407,23 @@ export async function connectToWhatsApp() {
         const timestamp = msg.messageTimestamp
         const mediaInfo = getMediaInfo(msg.message)
 
+        // Info reply/quote (kalau pesan ini membalas pesan lain)
+        const ctx = getContextInfo(msg.message)
+        let replyToWaId = null, replyToBody = null, replyToFromMe = null
+        if (ctx?.stanzaId) {
+          replyToWaId = ctx.stanzaId
+          replyToBody = extractBody(ctx.quotedMessage)
+          const { data: q } = await supabase
+            .from('messages')
+            .select('from_me, body')
+            .eq('wa_message_id', replyToWaId)
+            .maybeSingle()
+          if (q) {
+            replyToFromMe = q.from_me
+            if (!replyToBody) replyToBody = q.body
+          }
+        }
+
         // Metadata media bisa dibaca tanpa download (mimetype/nama/ext).
         // File-nya diunduh di background supaya pesan tampil instan.
         const mediaMimetype = mediaInfo ? (mediaInfo.msgObj.mimetype || 'application/octet-stream') : null
@@ -416,6 +446,7 @@ export async function connectToWhatsApp() {
           mediaType: mediaInfo?.type || null,
           mediaUrl: null, // menyusul via background download
           mediaFilename, mediaMimetype,
+          replyToWaId, replyToBody, replyToFromMe,
         })
 
         const payload = { message: savedMessage, conversationId, contactId, contactName: contactName || phone, phone }

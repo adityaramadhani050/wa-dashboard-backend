@@ -224,7 +224,7 @@ router.patch('/:id/status', async (req, res) => {
 router.post('/:id/messages', async (req, res) => {
   try {
     const { id } = req.params;
-    const { message } = req.body;
+    const { message, reply_to } = req.body;
     if (!message) return res.status(400).json({ error: 'message is required' });
 
     const sock = getSock();
@@ -251,7 +251,16 @@ router.post('/:id/messages', async (req, res) => {
 
     const tStart = Date.now();
 
-    const sentResult = await sock.sendMessage(jid, { text: message });
+    // Reply/quote: bangun objek quoted minimal dari data pesan yang dibalas
+    const sendOpts = {};
+    if (reply_to?.wa_message_id) {
+      sendOpts.quoted = {
+        key: { remoteJid: jid, fromMe: !!reply_to.from_me, id: reply_to.wa_message_id },
+        message: { conversation: reply_to.body || '' },
+      };
+    }
+
+    const sentResult = await sock.sendMessage(jid, { text: message }, sendOpts);
     const waMessageId = sentResult?.key?.id || null;
     const tWa = Date.now();
 
@@ -264,6 +273,9 @@ router.post('/:id/messages', async (req, res) => {
         timestamp: new Date().toISOString(),
         status: 'sent',
         wa_message_id: waMessageId,
+        reply_to_wa_id: reply_to?.wa_message_id || null,
+        reply_to_body: reply_to?.body || null,
+        reply_to_from_me: reply_to?.from_me ?? null,
       })
       .select()
       .single();
