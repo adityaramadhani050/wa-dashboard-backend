@@ -199,6 +199,34 @@ router.post('/:id/assign', async (req, res) => {
   }
 });
 
+// Hapus assign agent dari percakapan -> kembali "Open" (kecuali yang sudah Resolved)
+router.post('/:id/unassign', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { data, error } = await supabase
+      .from('conversations')
+      .update({ assigned_to: null, updated_at: new Date().toISOString() })
+      .eq('id', id)
+      .select('*, contact:contacts (id, phone, name)')
+      .single();
+    if (error) throw error;
+
+    // Status kembali ke "Open" bila masih aktif (bukan resolved)
+    await supabase.from('conversations')
+      .update({ status: 'open' })
+      .eq('id', id)
+      .eq('status', 'in_progress');
+
+    // Broadcast unassign (agent: null) supaya badge hilang realtime di semua dashboard
+    broadcast('conversation_assigned', { conversationId: id, agent: null }).catch(() => {});
+
+    res.json(data);
+  } catch (err) {
+    console.error(`POST /conversations/${req.params.id}/unassign error:`, err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.patch('/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
