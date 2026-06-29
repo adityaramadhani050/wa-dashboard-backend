@@ -298,6 +298,141 @@ async function pushNewMessage(payload) {
   }
 }
 
+// Simpan satu pesan WA (dipakai oleh messages.upsert & messaging-history.set).
+// isLive: pesan real-time (notify) -> boleh push/auto-assign/stats.
+// Non-live (append / history sync) -> hanya disimpan & broadcast, batasi recency.
+async function persistMessage(msg, { isLive }) {
+  if (!msg?.message) return
+  const msgKeys = Object.keys(msg.message)
+  const isProtocol = msgKeys.every(k =>
+    ['messageContextInfo', 'protocolMessage', 'senderKeyDistributionMessage', 'reactionMessage'].includes(k)
+  )
+  if (isProtocol) return
+
+  const fromMe = msg.key.fromMe
+  const jid = msg.key.remoteJid
+  if (!jid || jid === 'status@broadcast') return
+  if (jid.endsWith('@broadcast') || jid.endsWith('@temp')) return
+
+  const isGroup = jid.endsWith('@g.us')
+  const waMessageId = msg.key.id
+
+  if (waMessageId) {
+    const { data: dup } = await supabase
+      .from('messages').select('id').eq('wa_message_id', waMessageId).maybeSingle()
+    if (dup) return
+  }
+
+  // Pesan menyusul (append/history): hanya yang <=7 hari (hindari impor riwayat lama massal)
+  if (!isLive) {
+    const tsMs = Number(msg.messageTimestamp || 0) * 1000
+    if (tsMs && (Date.now() - tsMs) > 7 * 24 * 60 * 60 * 1000) return
+  }
+
+  let phone, contactName
+  if (isGroup) {
+    phone = jid.split('@')[0]
+    try {
+      const meta = await sock.groupMetadata(jid)
+      contactName = meta?.subject || phone
+    } catch { contactName = phone }
+  } else {
+    phone = resolvePhone(jid)
+    contactName = fromMe ? null : (msg.pushName || null)
+  }
+
+  const tStart = Date.now()
+  const body = extractBody(msg.message)
+  const timestamp = msg.messageTimestamp
+  const mediaInfo = getMediaInfo(msg.message)
+
+  const ctx = getContextInfo(msg.message)
+  let replyToWaId = null, replyToBody = null, replyToFromMe = null
+  if (ctx?.stanzaId) {
+    replyToWaId = ctx.stanzaId
+    replyToBody = extractBody(ctx.quotedMessage)
+    const { data: q } = await supabase
+      .from('messages').select('from_me, body').eq('wa_message_id', replyToWaId).maybeSingle()
+    if (q) { replyToFromMe = q.from_me; if (!replyToBody) replyToBody = q.body }
+  }
+
+  const mediaMimetype = mediaInfo ? (mediaInfo.msgObj.mimetype || 'application/octet-stream') : null
+  const storageFilename = mediaInfo ? `${Date.now()}-${waMessageId}.${mediaInfo.ext}` : null
+  const mediaFilename = mediaInfo ? (mediaInfo.filename || storageFilename) : null
+
+  const { contactId, conversationId } = await withPhoneLock(phone, async () => {
+    const cId = await upsertContact(phone, contactName)
+    const convId = await upsertConversation(cId, jid)
+    return { contactId: cId, conversationId: convId }
+  })
+  const tDb = Date.now()
+
+  const savedMessage = await saveMessage({
+    conversationId, fromMe,
+    body: body || (mediaInfo ? `[${mediaInfo.type}]` : '[media]'),
+    timestamp, waMessageId,
+    mediaType: mediaInfo?.type || null,
+    mediaUrl: null,
+    mediaFilename, mediaMimetype,
+    replyToWaId, replyToBody, replyToFromMe,
+  })
+
+  const payload = { message: savedMessage, conversationId, contactId, contactName: contactName || phone, phone }
+  const published = await publish('new_message', payload)
+  if (!published) ioInstance?.emit('new_message', payload)
+  console.log(`[Recv${isLive ? '' : '/sync'}] ${fromMe ? 'out' : 'in '} conv=${conversationId} db=${tDb - tStart}ms${mediaInfo ? ` media=${mediaInfo.type}(bg)` : ''}`)
+
+  supabase.from('conversations')
+    .update({ updated_at: new Date().toISOString() })
+    .eq('id', conversationId)
+    .then(() => {}).catch(() => {})
+
+  if (isLive) {
+    incrementDailyStats().catch(() => {})
+    if (!fromMe) {
+      // Reaktivasi chat resolved
+      supabase.from('conversations').update({ status: 'in_progress' })
+        .eq('id', conversationId).eq('status', 'resolved').not('assigned_to', 'is', null)
+        .then(() => {}, () => {})
+      supabase.from('conversations').update({ status: 'open' })
+        .eq('id', conversationId).eq('status', 'resolved').is('assigned_to', null)
+        .then(() => {}, () => {})
+      // Auto-assign + push
+      autoAssignConversation(conversationId)
+        .then(async (agent) => {
+          if (agent) {
+            const ap = { conversationId, agent }
+            const pub = await publish('conversation_assigned', ap)
+            if (!pub) ioInstance?.emit('conversation_assigned', ap)
+          }
+        })
+        .catch(() => null)
+        .finally(() => { pushNewMessage(payload).catch(() => {}) })
+    }
+  }
+
+  // Download + upload media di background, lalu broadcast update URL-nya
+  if (mediaInfo) {
+    ;(async () => {
+      try {
+        const buffer = await downloadMediaMessage(
+          msg, 'buffer', {},
+          { logger: console, reuploadRequest: sock.updateMediaMessage }
+        )
+        const mediaUrl = await uploadToStorage(buffer, storageFilename, mediaMimetype)
+        if (!mediaUrl) return
+        const { data: updated } = await supabase
+          .from('messages').update({ media_url: mediaUrl }).eq('id', savedMessage.id).select().single()
+        const upPayload = { message: updated || { ...savedMessage, media_url: mediaUrl }, conversationId, contactId }
+        const pub2 = await publish('message_updated', upPayload)
+        if (!pub2) ioInstance?.emit('message_updated', upPayload)
+      } catch (err) {
+        console.warn('[Media] Background download/upload failed:', err.message)
+      }
+    })()
+  }
+}
+
 export async function connectToWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER)
   const { version } = await fetchLatestBaileysVersion()
@@ -383,178 +518,23 @@ export async function connectToWhatsApp() {
   })
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    // 'notify' = pesan live; 'append' = pesan menyusul saat reconnect (offline/sinkron).
-    // Keduanya diproses agar pesan yang masuk saat WA sempat disconnect tetap tersimpan.
+    // 'notify' = pesan live; 'append' = pesan menyusul saat reconnect (offline/sinkron)
     if (type !== 'notify' && type !== 'append') return
     const isLive = type === 'notify'
-
     for (const msg of messages) {
-      try {
-        if (!msg.message) continue
+      try { await persistMessage(msg, { isLive }) }
+      catch (err) { console.error('Error processing message:', err) }
+    }
+  })
 
-        const msgKeys = Object.keys(msg.message)
-        const isProtocol = msgKeys.every(k =>
-          ['messageContextInfo', 'protocolMessage', 'senderKeyDistributionMessage', 'reactionMessage'].includes(k)
-        )
-        if (isProtocol) continue
-
-        const fromMe = msg.key.fromMe
-        const jid = msg.key.remoteJid
-
-        if (jid === 'status@broadcast') continue
-        if (jid.endsWith('@broadcast') || jid.endsWith('@temp')) continue
-
-        const isGroup = jid.endsWith('@g.us')
-        const waMessageId = msg.key.id
-
-        if (waMessageId) {
-          const { data: dup } = await supabase
-            .from('messages').select('id').eq('wa_message_id', waMessageId).maybeSingle()
-          if (dup) continue
-        }
-
-        // Untuk pesan menyusul (append/sinkron), batasi hanya yang masih baru
-        // (<=7 hari) supaya tidak mengimpor riwayat lama secara massal.
-        if (!isLive) {
-          const tsMs = Number(msg.messageTimestamp || 0) * 1000
-          if (tsMs && (Date.now() - tsMs) > 7 * 24 * 60 * 60 * 1000) continue
-        }
-
-        let phone, contactName
-        if (isGroup) {
-          phone = jid.split('@')[0]
-          try {
-            const meta = await sock.groupMetadata(jid)
-            contactName = meta?.subject || phone
-          } catch { contactName = phone }
-        } else {
-          phone = resolvePhone(jid)
-          contactName = fromMe ? null : (msg.pushName || null)
-        }
-
-        const tStart = Date.now()
-        const body = extractBody(msg.message)
-        const timestamp = msg.messageTimestamp
-        const mediaInfo = getMediaInfo(msg.message)
-
-        // Info reply/quote (kalau pesan ini membalas pesan lain)
-        const ctx = getContextInfo(msg.message)
-        let replyToWaId = null, replyToBody = null, replyToFromMe = null
-        if (ctx?.stanzaId) {
-          replyToWaId = ctx.stanzaId
-          replyToBody = extractBody(ctx.quotedMessage)
-          const { data: q } = await supabase
-            .from('messages')
-            .select('from_me, body')
-            .eq('wa_message_id', replyToWaId)
-            .maybeSingle()
-          if (q) {
-            replyToFromMe = q.from_me
-            if (!replyToBody) replyToBody = q.body
-          }
-        }
-
-        // Metadata media bisa dibaca tanpa download (mimetype/nama/ext).
-        // File-nya diunduh di background supaya pesan tampil instan.
-        const mediaMimetype = mediaInfo ? (mediaInfo.msgObj.mimetype || 'application/octet-stream') : null
-        const storageFilename = mediaInfo ? `${Date.now()}-${waMessageId}.${mediaInfo.ext}` : null
-        const mediaFilename = mediaInfo ? (mediaInfo.filename || storageFilename) : null
-
-        // Serialize per nomor: cegah balapan yang bikin 1 kontak punya banyak
-        // percakapan saat pesan datang beruntun (burst).
-        const { contactId, conversationId } = await withPhoneLock(phone, async () => {
-          const cId = await upsertContact(phone, contactName)
-          const convId = await upsertConversation(cId, jid)
-          return { contactId: cId, conversationId: convId }
-        })
-        const tDb = Date.now()
-
-        const savedMessage = await saveMessage({
-          conversationId, fromMe,
-          body: body || (mediaInfo ? `[${mediaInfo.type}]` : '[media]'),
-          timestamp, waMessageId,
-          mediaType: mediaInfo?.type || null,
-          mediaUrl: null, // menyusul via background download
-          mediaFilename, mediaMimetype,
-          replyToWaId, replyToBody, replyToFromMe,
-        })
-
-        const payload = { message: savedMessage, conversationId, contactId, contactName: contactName || phone, phone }
-        const published = await publish('new_message', payload)
-        if (!published) ioInstance?.emit('new_message', payload)
-        const tEmit = Date.now()
-        console.log(`[Recv] ${fromMe ? 'out' : 'in '} conv=${conversationId} db=${tDb - tStart}ms emit=${tEmit - tStart}ms${mediaInfo ? ` media=${mediaInfo.type}(bg)` : ''}`)
-
-        supabase.from('conversations')
-          .update({ updated_at: new Date().toISOString() })
-          .eq('id', conversationId)
-          .then(() => {}).catch(() => {})
-        incrementDailyStats().catch(() => {})
-
-        // Pesan masuk pada chat "Resolved" -> reaktivasi: "Aktif" bila masih
-        // di-assign ke agent, atau "Open" bila belum di-assign.
-        if (!fromMe) {
-          supabase.from('conversations')
-            .update({ status: 'in_progress' })
-            .eq('id', conversationId)
-            .eq('status', 'resolved')
-            .not('assigned_to', 'is', null)
-            .then(() => {}, () => {})
-          supabase.from('conversations')
-            .update({ status: 'open' })
-            .eq('id', conversationId)
-            .eq('status', 'resolved')
-            .is('assigned_to', null)
-            .then(() => {}, () => {})
-        }
-
-        // Auto-assign (bila aktif) lalu push — supaya agent yang baru di-assign
-        // langsung menerima notifikasi. Non-blocking terhadap alur utama.
-        if (!fromMe) {
-          autoAssignConversation(conversationId)
-            .then(async (agent) => {
-              if (agent) {
-                // Broadcast assignment baru supaya badge agent muncul realtime
-                const ap = { conversationId, agent }
-                const pub = await publish('conversation_assigned', ap)
-                if (!pub) ioInstance?.emit('conversation_assigned', ap)
-              }
-            })
-            .catch(() => null)
-            // Push hanya untuk pesan live; batch saat reconnect tidak spam notifikasi
-            .finally(() => { if (isLive) pushNewMessage(payload).catch(() => {}) })
-        }
-
-        // Download + upload media di background, lalu broadcast update URL-nya
-        if (mediaInfo) {
-          ;(async () => {
-            const tm0 = Date.now()
-            try {
-              const buffer = await downloadMediaMessage(
-                msg, 'buffer', {},
-                { logger: console, reuploadRequest: sock.updateMediaMessage }
-              )
-              const mediaUrl = await uploadToStorage(buffer, storageFilename, mediaMimetype)
-              if (!mediaUrl) return
-              const { data: updated } = await supabase
-                .from('messages')
-                .update({ media_url: mediaUrl })
-                .eq('id', savedMessage.id)
-                .select()
-                .single()
-              const upPayload = { message: updated || { ...savedMessage, media_url: mediaUrl }, conversationId, contactId }
-              const pub2 = await publish('message_updated', upPayload)
-              if (!pub2) ioInstance?.emit('message_updated', upPayload)
-              console.log(`[Recv] media ready conv=${conversationId} ${mediaInfo.type} in ${Date.now() - tm0}ms`)
-            } catch (err) {
-              console.warn('[Media] Background download/upload failed:', err.message)
-            }
-          })()
-        }
-
-      } catch (err) {
-        console.error('Error processing message:', err)
-      }
+  // Sinkronisasi riwayat/offline: WhatsApp mengirim pesan yang masuk saat
+  // device offline lewat event ini saat reconnect. Diproses sebagai non-live.
+  sock.ev.on('messaging-history.set', async ({ messages }) => {
+    if (!Array.isArray(messages) || !messages.length) return
+    console.log(`[Sync] messaging-history.set: ${messages.length} pesan`)
+    for (const msg of messages) {
+      try { await persistMessage(msg, { isLive: false }) }
+      catch (err) { console.warn('[Sync] gagal proses pesan history:', err.message) }
     }
   })
 
