@@ -14,6 +14,15 @@ export function signToken(user) {
   );
 }
 
+// Token mesin/service (mis. bot notif WA) — TANPA kedaluwarsa.
+// Perlakukan seperti password; dicabut dengan merotasi JWT_SECRET.
+export function signServiceToken({ id = 'bot-notif-wa', name = 'Bot Notif WA', role = 'admin' } = {}) {
+  return jwt.sign(
+    { id, username: id, name, role, type: 'service' },
+    JWT_SECRET
+  );
+}
+
 function readToken(req) {
   const h = req.headers.authorization || '';
   const m = h.match(/^Bearer\s+(.+)$/i);

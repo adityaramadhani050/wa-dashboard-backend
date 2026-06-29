@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { supabase } from '../db/supabase.js';
-import { signToken } from '../middleware/auth.js';
+import { signToken, signServiceToken, requireAdmin } from '../middleware/auth.js';
 
 const router = Router();
 
@@ -27,6 +27,23 @@ router.post('/login', async (req, res) => {
   const { password_hash, ...user } = data;
   const token = signToken(user);
   res.json({ user, token });
+});
+
+// Generate token bot/service (tanpa kedaluwarsa) untuk integrasi mesin-ke-mesin,
+// mis. WA Bot Notifikasi RenusPro. Khusus admin (requireAdmin).
+router.post('/bot-token', requireAdmin, (req, res) => {
+  try {
+    // Selalu wajib admin walau AUTH_ENFORCED masih false (mencegah eskalasi hak).
+    if (req.user?.role !== 'admin') {
+      return res.status(403).json({ error: 'Akses khusus admin.' });
+    }
+    const name = (req.body?.name || 'Bot Notif WA').toString().slice(0, 60);
+    const token = signServiceToken({ name });
+    res.json({ success: true, token, name });
+  } catch (err) {
+    console.error('POST /auth/bot-token error:', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 export default router;
