@@ -101,14 +101,14 @@ function resolvePhone(jid) {
   return lidToPhone.get(raw) || raw
 }
 
-// Cek apakah percakapan punya tag "No Need Reply" (tak perlu balasan cepat)
-async function hasNoNeedReplyTag(conversationId) {
+// Cek apakah percakapan punya tag "Non-Client" (bukan calon klien -> tak perlu balasan cepat)
+async function hasNonClientTag(conversationId) {
   try {
     const { data } = await supabase
       .from('conversation_tags')
       .select('tags (name)')
       .eq('conversation_id', conversationId)
-    return (data || []).some((r) => /no[\s_-]*need[\s_-]*reply/i.test(r.tags?.name || ''))
+    return (data || []).some((r) => /non[\s_-]*client/i.test(r.tags?.name || ''))
   } catch {
     return false
   }
@@ -403,9 +403,9 @@ async function persistMessage(msg, { isLive }) {
   if (isLive) {
     incrementDailyStats().catch(() => {})
     if (!fromMe) {
-      // Chat bertag "No Need Reply": tetap Resolved selamanya, tidak reaktivasi,
+      // Chat bertag "Non-Client": tetap Resolved selamanya, tidak reaktivasi,
       // tidak auto-assign, tidak overdue (overdue dicek di frontend juga).
-      const skip = await hasNoNeedReplyTag(conversationId)
+      const skip = await hasNonClientTag(conversationId)
       if (!skip) {
         // Reaktivasi chat resolved
         supabase.from('conversations').update({ status: 'in_progress' })
