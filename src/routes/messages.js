@@ -9,6 +9,23 @@ const upload = multer({
   limits: { fileSize: 64 * 1024 * 1024 },
 });
 
+// Normalisasi reply_to (bisa string JSON dari multipart, atau objek)
+function parseReplyTo(raw) {
+  if (!raw) return null;
+  if (typeof raw === 'object') return raw;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+// Bangun opsi quoted Baileys dari reply_to
+function buildQuotedOpts(jid, replyTo) {
+  if (!replyTo?.wa_message_id) return {};
+  return {
+    quoted: {
+      key: { remoteJid: jid, fromMe: !!replyTo.from_me, id: replyTo.wa_message_id },
+      message: { conversation: replyTo.body || '' },
+    },
+  };
+}
+
 function mediaTypeFromMime(mime) {
   if (!mime) return 'document';
   if (mime.startsWith('image/')) return 'image';
@@ -58,6 +75,7 @@ router.post('/send', async (req, res) => {
 router.post('/send-media', upload.single('file'), async (req, res) => {
   try {
     const { conversation_id, caption } = req.body;
+    const replyTo = parseReplyTo(req.body.reply_to);
     const file = req.file;
 
     if (!file) return res.status(400).json({ error: 'file is required' });
@@ -86,7 +104,7 @@ router.post('/send-media', upload.single('file'), async (req, res) => {
       baileysMsg = { document: buffer, fileName: file.originalname, mimetype: file.mimetype, caption: caption_ };
     }
 
-    const sentResult = await sock.sendMessage(jid, baileysMsg);
+    const sentResult = await sock.sendMessage(jid, baileysMsg, buildQuotedOpts(jid, replyTo));
     const waMessageId = sentResult?.key?.id || null;
 
     let mediaUrl = null;
@@ -116,6 +134,9 @@ router.post('/send-media', upload.single('file'), async (req, res) => {
         media_url: mediaUrl,
         media_filename: file.originalname,
         media_mimetype: file.mimetype,
+        reply_to_wa_id: replyTo?.wa_message_id || null,
+        reply_to_body: replyTo?.body || null,
+        reply_to_from_me: replyTo?.from_me ?? null,
       })
       .select().single();
 
@@ -204,6 +225,7 @@ router.delete('/quick-media/:id', async (req, res) => {
 router.post('/send-quick-media', async (req, res) => {
   try {
     const { conversation_id, quick_media_id, caption } = req.body;
+    const replyTo = parseReplyTo(req.body.reply_to);
     if (!conversation_id) return res.status(400).json({ error: 'conversation_id is required' });
     if (!quick_media_id) return res.status(400).json({ error: 'quick_media_id is required' });
 
@@ -255,7 +277,7 @@ router.post('/send-quick-media', async (req, res) => {
       };
     }
 
-    const sentResult = await sock.sendMessage(jid, baileysMsg);
+    const sentResult = await sock.sendMessage(jid, baileysMsg, buildQuotedOpts(jid, replyTo));
     const waMessageId = sentResult?.key?.id || null;
 
     const { data: saved, error } = await supabase
@@ -267,6 +289,9 @@ router.post('/send-quick-media', async (req, res) => {
         timestamp: new Date().toISOString(),
         status: 'sent',
         wa_message_id: waMessageId,
+        reply_to_wa_id: replyTo?.wa_message_id || null,
+        reply_to_body: replyTo?.body || null,
+        reply_to_from_me: replyTo?.from_me ?? null,
         media_type: mediaType,
         media_url: quickMedia.media_url,
         media_filename: quickMedia.label,
