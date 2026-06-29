@@ -101,6 +101,19 @@ function resolvePhone(jid) {
   return lidToPhone.get(raw) || raw
 }
 
+// Cek apakah percakapan punya tag "No Need Reply" (tak perlu balasan cepat)
+async function hasNoNeedReplyTag(conversationId) {
+  try {
+    const { data } = await supabase
+      .from('conversation_tags')
+      .select('tags (name)')
+      .eq('conversation_id', conversationId)
+    return (data || []).some((r) => /no[\s_-]*need[\s_-]*reply/i.test(r.tags?.name || ''))
+  } catch {
+    return false
+  }
+}
+
 // Ambil contextInfo (info reply/quote) dari berbagai tipe pesan
 function getContextInfo(message) {
   if (!message) return null
@@ -390,24 +403,29 @@ async function persistMessage(msg, { isLive }) {
   if (isLive) {
     incrementDailyStats().catch(() => {})
     if (!fromMe) {
-      // Reaktivasi chat resolved
-      supabase.from('conversations').update({ status: 'in_progress' })
-        .eq('id', conversationId).eq('status', 'resolved').not('assigned_to', 'is', null)
-        .then(() => {}, () => {})
-      supabase.from('conversations').update({ status: 'open' })
-        .eq('id', conversationId).eq('status', 'resolved').is('assigned_to', null)
-        .then(() => {}, () => {})
-      // Auto-assign + push
-      autoAssignConversation(conversationId)
-        .then(async (agent) => {
-          if (agent) {
-            const ap = { conversationId, agent }
-            const pub = await publish('conversation_assigned', ap)
-            if (!pub) ioInstance?.emit('conversation_assigned', ap)
-          }
-        })
-        .catch(() => null)
-        .finally(() => { pushNewMessage(payload).catch(() => {}) })
+      // Chat bertag "No Need Reply": tetap Resolved selamanya, tidak reaktivasi,
+      // tidak auto-assign, tidak overdue (overdue dicek di frontend juga).
+      const skip = await hasNoNeedReplyTag(conversationId)
+      if (!skip) {
+        // Reaktivasi chat resolved
+        supabase.from('conversations').update({ status: 'in_progress' })
+          .eq('id', conversationId).eq('status', 'resolved').not('assigned_to', 'is', null)
+          .then(() => {}, () => {})
+        supabase.from('conversations').update({ status: 'open' })
+          .eq('id', conversationId).eq('status', 'resolved').is('assigned_to', null)
+          .then(() => {}, () => {})
+        // Auto-assign + push
+        autoAssignConversation(conversationId)
+          .then(async (agent) => {
+            if (agent) {
+              const ap = { conversationId, agent }
+              const pub = await publish('conversation_assigned', ap)
+              if (!pub) ioInstance?.emit('conversation_assigned', ap)
+            }
+          })
+          .catch(() => null)
+          .finally(() => { pushNewMessage(payload).catch(() => {}) })
+      }
     }
   }
 

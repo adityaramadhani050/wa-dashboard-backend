@@ -318,6 +318,15 @@ router.post('/:id/tags', async (req, res) => {
       }
       throw error;
     }
+
+    // Tag "No Need Reply" -> chat langsung Resolved (tidak butuh balasan cepat)
+    const { data: tag } = await supabase.from('tags').select('name').eq('id', tag_id).maybeSingle();
+    if (tag && /no[\s_-]*need[\s_-]*reply/i.test(tag.name || '')) {
+      await supabase.from('conversations')
+        .update({ status: 'resolved', updated_at: new Date().toISOString() })
+        .eq('id', id);
+    }
+
     res.status(201).json(data);
   } catch (err) {
     console.error(`POST /conversations/${req.params.id}/tags error:`, err);
