@@ -154,6 +154,74 @@ router.post('/send-media', upload.single('file'), async (req, res) => {
   }
 });
 
+// Teruskan (forward) sebuah pesan ke percakapan lain
+router.post('/forward', async (req, res) => {
+  try {
+    const { message_id, target_conversation_id } = req.body;
+    if (!message_id || !target_conversation_id) {
+      return res.status(400).json({ error: 'message_id dan target_conversation_id wajib diisi' });
+    }
+
+    const sock = getSock();
+    if (!sock) return res.status(503).json({ error: 'WhatsApp is not connected yet' });
+
+    const { data: msg, error: msgErr } = await supabase
+      .from('messages')
+      .select('body, media_type, media_url, media_filename, media_mimetype')
+      .eq('id', message_id)
+      .single();
+    if (msgErr || !msg) return res.status(404).json({ error: 'Pesan tidak ditemukan' });
+
+    const { data: conv } = await supabase
+      .from('conversations').select('wa_jid').eq('id', target_conversation_id).single();
+    if (!conv?.wa_jid) return res.status(404).json({ error: 'Percakapan tujuan tidak ditemukan' });
+
+    const jid = conv.wa_jid;
+    const caption = msg.body && !msg.body.startsWith('[') ? msg.body : undefined;
+
+    let baileysMsg;
+    if (msg.media_type && msg.media_url) {
+      if (msg.media_type === 'image') baileysMsg = { image: { url: msg.media_url }, caption, mimetype: msg.media_mimetype || undefined };
+      else if (msg.media_type === 'video') baileysMsg = { video: { url: msg.media_url }, caption, mimetype: msg.media_mimetype || undefined };
+      else if (msg.media_type === 'audio') baileysMsg = { audio: { url: msg.media_url }, mimetype: msg.media_mimetype || undefined, ptt: false };
+      else baileysMsg = { document: { url: msg.media_url }, fileName: msg.media_filename || 'file', mimetype: msg.media_mimetype || 'application/octet-stream', caption };
+    } else {
+      if (!msg.body) return res.status(400).json({ error: 'Pesan kosong, tidak bisa diteruskan' });
+      baileysMsg = { text: msg.body };
+    }
+
+    const sentResult = await sock.sendMessage(jid, baileysMsg);
+    const waMessageId = sentResult?.key?.id || null;
+
+    const { data: saved, error } = await supabase
+      .from('messages')
+      .insert({
+        conversation_id: target_conversation_id,
+        from_me: true,
+        body: msg.body || `[${msg.media_type}]`,
+        timestamp: new Date().toISOString(),
+        status: 'sent',
+        wa_message_id: waMessageId,
+        media_type: msg.media_type || null,
+        media_url: msg.media_url || null,
+        media_filename: msg.media_filename || null,
+        media_mimetype: msg.media_mimetype || null,
+      })
+      .select().single();
+    if (error) throw error;
+
+    await supabase.from('conversations')
+      .update({ status: 'in_progress', updated_at: new Date().toISOString() })
+      .eq('id', target_conversation_id);
+
+    broadcast('new_message', { message: saved, conversationId: target_conversation_id }).catch(() => {});
+    res.json({ success: true, message: saved });
+  } catch (err) {
+    console.error('POST /messages/forward error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // List quick media gallery items
 router.get('/quick-media', async (req, res) => {
   try {
