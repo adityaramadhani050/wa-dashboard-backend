@@ -154,6 +154,44 @@ router.post('/send-media', upload.single('file'), async (req, res) => {
   }
 });
 
+// Hapus pesan (untuk semua bila pesan milik kita & masih ada wa_message_id)
+router.delete('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { data: msg } = await supabase
+      .from('messages')
+      .select('id, conversation_id, from_me, wa_message_id')
+      .eq('id', id)
+      .single();
+    if (!msg) return res.status(404).json({ error: 'Pesan tidak ditemukan' });
+
+    // Hapus di WhatsApp (delete for everyone) hanya untuk pesan keluar milik kita
+    if (msg.from_me && msg.wa_message_id) {
+      const sock = getSock();
+      if (sock) {
+        try {
+          const { data: conv } = await supabase
+            .from('conversations').select('wa_jid').eq('id', msg.conversation_id).single();
+          if (conv?.wa_jid) {
+            await sock.sendMessage(conv.wa_jid, {
+              delete: { remoteJid: conv.wa_jid, fromMe: true, id: msg.wa_message_id },
+            });
+          }
+        } catch (e) { console.warn('[Delete] WA delete gagal:', e.message); }
+      }
+    }
+
+    const { error } = await supabase.from('messages').delete().eq('id', id);
+    if (error) throw error;
+
+    broadcast('message_deleted', { id, conversationId: msg.conversation_id }).catch(() => {});
+    res.json({ success: true });
+  } catch (err) {
+    console.error('DELETE /messages/:id error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Teruskan (forward) sebuah pesan ke percakapan lain
 router.post('/forward', async (req, res) => {
   try {
