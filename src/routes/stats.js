@@ -140,12 +140,24 @@ router.get('/contacts', async (req, res) => {
   }
 });
 
-// Agent performance stats
+// Agent performance stats — mendukung filter periode ?from=YYYY-MM-DD&to=YYYY-MM-DD
+// (memfilter percakapan berdasarkan updated_at, konsisten dgn funnel & response-kpi)
 router.get('/agents', async (req, res) => {
   try {
+    let convQuery = supabase.from('conversations').select('id, assigned_to, status');
+    if (req.query.from || req.query.to) {
+      const toDate = req.query.to ? new Date(req.query.to) : new Date();
+      const fromDate = req.query.from ? new Date(req.query.from) : new Date(toDate.getTime() - 29 * 86400000);
+      fromDate.setHours(0, 0, 0, 0);
+      toDate.setHours(23, 59, 59, 999);
+      convQuery = convQuery
+        .gte('updated_at', fromDate.toISOString())
+        .lte('updated_at', toDate.toISOString());
+    }
+
     const [{ data: agentsList, error: ae }, { data: convs, error: ce }] = await Promise.all([
       supabase.from('agents').select('id, name, email'),
-      supabase.from('conversations').select('id, assigned_to, status'),
+      convQuery,
     ]);
     if (ae) throw ae;
     if (ce) throw ce;
