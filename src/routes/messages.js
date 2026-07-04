@@ -154,6 +154,59 @@ router.post('/send-media', upload.single('file'), async (req, res) => {
   }
 });
 
+// Edit pesan (hanya pesan keluar milik kita, teks, & <=15 menit sesuai aturan WA)
+const EDIT_WINDOW_MS = 15 * 60 * 1000;
+router.patch('/:id/edit', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { message } = req.body;
+    if (!message || !message.trim()) return res.status(400).json({ error: 'message wajib diisi' });
+
+    const { data: msg } = await supabase
+      .from('messages')
+      .select('id, conversation_id, from_me, wa_message_id, media_type, timestamp')
+      .eq('id', id)
+      .single();
+    if (!msg) return res.status(404).json({ error: 'Pesan tidak ditemukan' });
+    if (!msg.from_me) return res.status(403).json({ error: 'Hanya pesan sendiri yang bisa diedit' });
+    if (msg.media_type) return res.status(400).json({ error: 'Pesan media tidak bisa diedit' });
+    if (!msg.wa_message_id) return res.status(400).json({ error: 'Pesan ini tidak bisa diedit' });
+    const ageMs = Date.now() - new Date(msg.timestamp).getTime();
+    if (ageMs > EDIT_WINDOW_MS) {
+      return res.status(400).json({ error: 'Pesan sudah lewat 15 menit, tidak bisa diedit' });
+    }
+
+    const sock = getSock();
+    if (!sock) return res.status(503).json({ error: 'WhatsApp is not connected yet' });
+
+    const { data: conv } = await supabase
+      .from('conversations').select('wa_jid').eq('id', msg.conversation_id).single();
+    if (!conv?.wa_jid) return res.status(404).json({ error: 'Percakapan tidak ditemukan' });
+
+    // Kirim edit asli ke WhatsApp -> customer melihat pesan berubah + "Diedit"
+    await sock.sendMessage(conv.wa_jid, {
+      text: message,
+      edit: { remoteJid: conv.wa_jid, fromMe: true, id: msg.wa_message_id },
+    });
+
+    let res2 = await supabase.from('messages')
+      .update({ body: message, edited: true })
+      .eq('id', id)
+      .select('id, conversation_id, body, edited').maybeSingle();
+    if (res2.error) {
+      res2 = await supabase.from('messages')
+        .update({ body: message }).eq('id', id)
+        .select('id, conversation_id, body').maybeSingle();
+    }
+
+    broadcast('message_updated', { message: res2.data, conversationId: msg.conversation_id }).catch(() => {});
+    res.json({ success: true, message: res2.data });
+  } catch (err) {
+    console.error('PATCH /messages/:id/edit error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Hapus pesan (untuk semua bila pesan milik kita & masih ada wa_message_id)
 router.delete('/:id', async (req, res) => {
   try {
