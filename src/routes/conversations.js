@@ -95,20 +95,40 @@ router.get('/:id', async (req, res) => {
 router.get('/:id/messages', async (req, res) => {
   try {
     const { id } = req.params;
-    const { data, error } = await supabase
-      .from('messages')
-      .select('*')
-      .eq('conversation_id', id)
-      .order('timestamp', { ascending: true });
+    const limit = Math.min(parseInt(req.query.limit, 10) || 0, 200);
+    const before = req.query.before; // timestamp ISO -> muat pesan LEBIH LAMA dari ini
+
+    let data, error;
+    if (limit > 0) {
+      // Ambil `limit` pesan terbaru (atau sebelum `before`), lalu balik jadi urut naik.
+      let q = supabase
+        .from('messages')
+        .select('*')
+        .eq('conversation_id', id)
+        .order('timestamp', { ascending: false })
+        .limit(limit);
+      if (before) q = q.lt('timestamp', before);
+      ({ data, error } = await q);
+      if (!error && data) data = data.reverse();
+    } else {
+      // Tanpa limit -> perilaku lama (semua pesan, urut naik)
+      ({ data, error } = await supabase
+        .from('messages')
+        .select('*')
+        .eq('conversation_id', id)
+        .order('timestamp', { ascending: true }));
+    }
 
     if (error) throw error;
 
-    // Mark conversation as read — fire-and-forget, don't block the response
-    supabase
-      .from('conversations')
-      .update({ last_read_at: new Date().toISOString() })
-      .eq('id', id)
-      .then(({ error: e }) => { if (e) console.warn('last_read_at update warn:', e.message); });
+    // Tandai sudah dibaca hanya saat memuat halaman terbaru (bukan saat load older).
+    if (!before) {
+      supabase
+        .from('conversations')
+        .update({ last_read_at: new Date().toISOString() })
+        .eq('id', id)
+        .then(({ error: e }) => { if (e) console.warn('last_read_at update warn:', e.message); });
+    }
 
     res.json(data);
   } catch (err) {
