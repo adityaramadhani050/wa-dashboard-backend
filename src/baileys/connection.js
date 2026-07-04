@@ -141,6 +141,18 @@ function extractBody(message) {
   )
 }
 
+// Deteksi pesan yang diedit (dari WhatsApp). Mengembalikan id pesan asli &
+// konten baru, atau null. Edit bisa datang langsung sbg protocolMessage atau
+// dibungkus editedMessage.
+function getEditInfo(message) {
+  if (!message) return null
+  const proto = message.protocolMessage || message.editedMessage?.message?.protocolMessage
+  if (proto?.editedMessage && proto.key?.id) {
+    return { originalId: proto.key.id, newContent: proto.editedMessage }
+  }
+  return null
+}
+
 function getMediaInfo(message) {
   if (message.imageMessage)
     return { type: 'image', msgObj: message.imageMessage, ext: 'jpg', filename: null }
@@ -316,6 +328,34 @@ async function pushNewMessage(payload) {
 // Non-live (append / history sync) -> hanya disimpan & broadcast, batasi recency.
 async function persistMessage(msg, { isLive }) {
   if (!msg?.message) return
+
+  // Pesan diedit di WhatsApp -> update pesan asli (bukan simpan baris baru).
+  const edit = getEditInfo(msg.message)
+  if (edit) {
+    const newBody = extractBody(edit.newContent)
+    if (newBody != null) {
+      let updated = null
+      // Coba dgn kolom `edited`; jika kolom belum ada, ulangi tanpa itu.
+      let res = await supabase.from('messages')
+        .update({ body: newBody, edited: true })
+        .eq('wa_message_id', edit.originalId)
+        .select('id, conversation_id, body, edited').maybeSingle()
+      if (res.error) {
+        res = await supabase.from('messages')
+          .update({ body: newBody })
+          .eq('wa_message_id', edit.originalId)
+          .select('id, conversation_id, body').maybeSingle()
+      }
+      updated = res.data
+      if (updated) {
+        const p = { message: updated, conversationId: updated.conversation_id }
+        const pub = await publish('message_updated', p)
+        if (!pub) ioInstance?.emit('message_updated', p)
+      }
+    }
+    return
+  }
+
   const msgKeys = Object.keys(msg.message)
   const isProtocol = msgKeys.every(k =>
     ['messageContextInfo', 'protocolMessage', 'senderKeyDistributionMessage', 'reactionMessage'].includes(k)
