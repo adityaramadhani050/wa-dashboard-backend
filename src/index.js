@@ -21,6 +21,7 @@ import { requireAuth, requireAdmin } from './middleware/auth.js'
 import { getVapidPublicKey, isWebPushEnabled } from './push/webpush.js'
 import { isPushEnabled } from './push/fcm.js'
 import { startAutoResolveJob } from './services/autoResolve.js'
+import { startMediaTtlJob } from './services/mediaTtl.js'
 import { subscriber, redisAvailable } from './db/redis.js'
 
 const PORT = process.env.PORT || 3000
@@ -129,5 +130,6 @@ httpServer.listen(PORT, '0.0.0.0', async () => {
   console.log(`Server running on ${PORT}`)
   setIO(io)
   startAutoResolveJob()
+  startMediaTtlJob()
   await connectToWhatsApp()
 })
