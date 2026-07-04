@@ -156,6 +156,17 @@ function getEditInfo(message) {
   return null
 }
 
+// Edit terenkripsi (WhatsApp baru): secretEncryptedMessage bertipe MESSAGE_EDIT.
+// Teks barunya terenkripsi (encPayload) & butuh messageSecret pesan asli untuk
+// dibuka — tidak tersedia. Kembalikan id pesan target agar bisa ditandai diedit.
+function getSecretEditTarget(message) {
+  const sec = message?.secretEncryptedMessage
+  if (sec && String(sec.secretEncType) === 'MESSAGE_EDIT' && sec.targetMessageKey?.id) {
+    return sec.targetMessageKey.id
+  }
+  return null
+}
+
 function getMediaInfo(message) {
   if (message.imageMessage)
     return { type: 'image', msgObj: message.imageMessage, ext: 'jpg', filename: null }
@@ -359,9 +370,26 @@ async function persistMessage(msg, { isLive }) {
     return
   }
 
+  // Edit terenkripsi (secretEncryptedMessage): teks baru tak bisa dibaca tanpa
+  // messageSecret asli. Tandai pesan target sebagai "diedit" (tanpa ubah teks)
+  // & jangan simpan baris [media] sampah.
+  const secretEditId = getSecretEditTarget(msg.message)
+  if (secretEditId) {
+    const res = await supabase.from('messages')
+      .update({ edited: true })
+      .eq('wa_message_id', secretEditId)
+      .select('id, conversation_id, body, edited').maybeSingle()
+    if (!res.error && res.data) {
+      const p = { message: res.data, conversationId: res.data.conversation_id }
+      const pub = await publish('message_updated', p)
+      if (!pub) ioInstance?.emit('message_updated', p)
+    }
+    return
+  }
+
   const msgKeys = Object.keys(msg.message)
   const isProtocol = msgKeys.every(k =>
-    ['messageContextInfo', 'protocolMessage', 'senderKeyDistributionMessage', 'reactionMessage'].includes(k)
+    ['messageContextInfo', 'protocolMessage', 'senderKeyDistributionMessage', 'reactionMessage', 'secretEncryptedMessage'].includes(k)
   )
   if (isProtocol) return
 
