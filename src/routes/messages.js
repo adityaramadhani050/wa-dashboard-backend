@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import multer from 'multer';
-import { getSock, broadcast } from '../baileys/connection.js';
+import { getSock, broadcast, bumpConvOutgoing } from '../baileys/connection.js';
 import { supabase } from '../db/supabase.js';
 
 const router = Router();
@@ -62,7 +62,7 @@ router.post('/send', async (req, res) => {
         .insert({ conversation_id, from_me: true, body: message, timestamp: new Date().toISOString() })
         .select().single();
       if (error) throw error;
-      await supabase.from('conversations').update({ status: 'in_progress', updated_at: new Date().toISOString() }).eq('id', conversation_id);
+      await bumpConvOutgoing(conversation_id, message);
       return res.json({ success: true, message: saved });
     }
     res.json({ success: true });
@@ -142,9 +142,7 @@ router.post('/send-media', upload.single('file'), async (req, res) => {
 
     if (error) throw error;
 
-    await supabase.from('conversations')
-      .update({ status: 'in_progress', updated_at: new Date().toISOString() })
-      .eq('id', conversation_id);
+    await bumpConvOutgoing(conversation_id, caption || `[${mediaType}]`);
 
     broadcast('new_message', { message: saved, conversationId: conversation_id }).catch(() => {});
     res.json({ success: true, message: saved });
@@ -301,9 +299,7 @@ router.post('/forward', async (req, res) => {
       .select().single();
     if (error) throw error;
 
-    await supabase.from('conversations')
-      .update({ status: 'in_progress', updated_at: new Date().toISOString() })
-      .eq('id', target_conversation_id);
+    await bumpConvOutgoing(target_conversation_id, msg.body || `[${msg.media_type}]`);
 
     broadcast('new_message', { message: saved, conversationId: target_conversation_id }).catch(() => {});
     res.json({ success: true, message: saved });
@@ -460,9 +456,7 @@ router.post('/send-quick-media', async (req, res) => {
 
     if (error) throw error;
 
-    await supabase.from('conversations')
-      .update({ status: 'in_progress', updated_at: new Date().toISOString() })
-      .eq('id', conversation_id);
+    await bumpConvOutgoing(conversation_id, caption || `[${mediaType}] ${quickMedia.label}`);
 
     broadcast('new_message', { message: saved, conversationId: conversation_id }).catch(() => {});
     res.json({ success: true, message: saved });

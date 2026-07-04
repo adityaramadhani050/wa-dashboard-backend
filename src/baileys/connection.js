@@ -60,6 +60,19 @@ export async function triggerSync() {
   return { ok: true }
 }
 
+// Perbarui ringkasan percakapan setelah pesan KELUAR (dipakai route pengiriman).
+// Menjaga denormalisasi last_message dll. agar daftar chat tetap 1 query.
+export async function bumpConvOutgoing(conversationId, body) {
+  const now = new Date().toISOString()
+  try {
+    await supabase.from('conversations').update({
+      status: 'in_progress', updated_at: now,
+      last_message: body || '[media]', last_message_at: now,
+      last_from_me: true, awaiting_since: null,
+    }).eq('id', conversationId)
+  } catch { /* kolom ringkasan mungkin belum ada -> abaikan */ }
+}
+
 // Broadcast event ke semua dashboard (Redis pub/sub + fallback Socket.io langsung)
 export async function broadcast(channel, data) {
   const published = await publish(channel, data)
@@ -550,10 +563,24 @@ async function persistMessage(msg, { isLive }) {
   if (!published) ioInstance?.emit('new_message', payload)
   console.log(`[Recv${isLive ? '' : '/sync'}] ${fromMe ? 'out' : 'in '} conv=${conversationId} db=${tDb - tStart}ms${mediaInfo ? ` media=${mediaInfo.type}(bg)` : ''}`)
 
-  supabase.from('conversations')
-    .update({ updated_at: new Date().toISOString() })
-    .eq('id', conversationId)
-    .then(() => {}).catch(() => {})
+  // Denormalisasi ringkasan percakapan (mempercepat daftar chat -> 1 query).
+  const tsIso = new Date((Number(timestamp) || Math.floor(Date.now() / 1000)) * 1000).toISOString()
+  const summaryBody = body || (mediaInfo ? `[${mediaInfo.type}]` : '[media]')
+  const convSummary = {
+    updated_at: new Date().toISOString(),
+    last_message: summaryBody,
+    last_message_at: tsIso,
+    last_from_me: fromMe,
+  }
+  if (fromMe) convSummary.awaiting_since = null
+  supabase.from('conversations').update(convSummary).eq('id', conversationId)
+    .then(({ error }) => { if (error) { /* kolom ringkasan mungkin belum ada */ } }, () => {})
+  // Pesan masuk: set awaiting_since bila belum ada (kolom terpisah agar tak menimpa)
+  if (!fromMe) {
+    supabase.from('conversations').update({ awaiting_since: tsIso })
+      .eq('id', conversationId).is('awaiting_since', null)
+      .then(() => {}, () => {})
+  }
 
   if (isLive) {
     incrementDailyStats().catch(() => {})

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { supabase } from '../db/supabase.js';
-import { getSock, broadcast } from '../baileys/connection.js';
+import { getSock, broadcast, bumpConvOutgoing } from '../baileys/connection.js';
 
 const router = Router();
 
@@ -36,61 +36,22 @@ router.get('/', async (req, res) => {
       });
     }
 
-    const enriched = await Promise.all(
-      data.map(async (conv) => {
-        const { data: lastMsg } = await supabase
-          .from('messages')
-          .select('body, timestamp, from_me')
-          .eq('conversation_id', conv.id)
-          .order('timestamp', { ascending: false })
-          .limit(1)
-          .maybeSingle();
-
-        let unreadQuery = supabase
-          .from('messages')
-          .select('id', { count: 'exact', head: true })
-          .eq('conversation_id', conv.id)
-          .eq('from_me', false);
-        if (conv.last_read_at) unreadQuery = unreadQuery.gt('timestamp', conv.last_read_at);
-        const { count: unreadCount } = await unreadQuery;
-
-        // Hitung sejak kapan customer menunggu dibalas (untuk KPI response time <5 menit).
-        // awaitingSince = waktu pesan masuk pertama yang belum dibalas agent.
-        const lastFromMe = lastMsg ? !!lastMsg.from_me : null;
-        let awaitingSince = null;
-        if (lastMsg && lastMsg.from_me === false) {
-          const { data: lastReply } = await supabase
-            .from('messages')
-            .select('timestamp')
-            .eq('conversation_id', conv.id)
-            .eq('from_me', true)
-            .order('timestamp', { ascending: false })
-            .limit(1)
-            .maybeSingle();
-
-          let firstUnansweredQuery = supabase
-            .from('messages')
-            .select('timestamp')
-            .eq('conversation_id', conv.id)
-            .eq('from_me', false)
-            .order('timestamp', { ascending: true })
-            .limit(1);
-          if (lastReply?.timestamp) firstUnansweredQuery = firstUnansweredQuery.gt('timestamp', lastReply.timestamp);
-          const { data: firstUnanswered } = await firstUnansweredQuery.maybeSingle();
-          awaitingSince = firstUnanswered?.timestamp || lastMsg.timestamp;
-        }
-
-        return {
-          ...conv,
-          lastMessage: lastMsg?.body || null,
-          lastMessageAt: lastMsg?.timestamp || conv.updated_at,
-          lastFromMe,
-          awaitingSince,
-          tags: tagsByConversation[conv.id] || [],
-          unread: (unreadCount || 0) > 0,
-        };
-      })
-    );
+    // Ringkasan sudah didenormalisasi di baris conversations -> tanpa query per-chat.
+    const enriched = data.map((conv) => {
+      const lastFromMe = conv.last_from_me ?? null;
+      // Unread (boolean): pesan terakhir dari customer & lebih baru dari last_read_at
+      const unread = lastFromMe === false && !!conv.last_message_at &&
+        (!conv.last_read_at || new Date(conv.last_message_at) > new Date(conv.last_read_at));
+      return {
+        ...conv,
+        lastMessage: conv.last_message || null,
+        lastMessageAt: conv.last_message_at || conv.updated_at,
+        lastFromMe,
+        awaitingSince: conv.awaiting_since || null,
+        tags: tagsByConversation[conv.id] || [],
+        unread,
+      };
+    });
 
     res.json(enriched);
   } catch (err) {
@@ -310,12 +271,8 @@ router.post('/:id/messages', async (req, res) => {
 
     if (msgError) throw msgError;
 
-    // Agent membalas -> chat jadi "Aktif" (in_progress). Fire-and-forget.
-    supabase
-      .from('conversations')
-      .update({ status: 'in_progress', updated_at: new Date().toISOString() })
-      .eq('id', id)
-      .then(() => {}, () => {});
+    // Agent membalas -> chat jadi "Aktif" (in_progress) + perbarui ringkasan.
+    bumpConvOutgoing(id, message).catch(() => {});
 
     // Broadcast balasan agar list chat & tab lain langsung update (lastFromMe=true)
     broadcast('new_message', { message: saved, conversationId: id }).catch(() => {});
