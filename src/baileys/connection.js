@@ -4,7 +4,10 @@ import makeWASocket, {
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
   downloadMediaMessage,
+  jidNormalizedUser,
+  proto,
 } from '@whiskeysockets/baileys'
+import { createHmac, createDecipheriv } from 'crypto'
 import { Boom } from '@hapi/boom'
 import { supabase } from '../db/supabase.js'
 import { publish, redisAvailable } from '../db/redis.js'
@@ -157,12 +160,54 @@ function getEditInfo(message) {
 }
 
 // Edit terenkripsi (WhatsApp baru): secretEncryptedMessage bertipe MESSAGE_EDIT.
-// Teks barunya terenkripsi (encPayload) & butuh messageSecret pesan asli untuk
-// dibuka — tidak tersedia. Kembalikan id pesan target agar bisa ditandai diedit.
-function getSecretEditTarget(message) {
+// Kembalikan objek secret bila ada.
+function getSecretEdit(message) {
   const sec = message?.secretEncryptedMessage
   if (sec && String(sec.secretEncType) === 'MESSAGE_EDIT' && sec.targetMessageKey?.id) {
-    return sec.targetMessageKey.id
+    return sec
+  }
+  return null
+}
+
+// Author sebuah key: pesan sendiri -> jid kita; kalau bukan -> participant/remoteJid.
+function keyAuthor(key, meJid) {
+  if (!key) return meJid || ''
+  if (key.fromMe) return meJid || ''
+  return jidNormalizedUser(key.participant || key.remoteJid || '')
+}
+
+function hmac256(key, data) { return createHmac('sha256', key).update(data).digest() }
+function gcmDecrypt(ciphertext, key, iv, aad) {
+  const buf = Buffer.from(ciphertext)
+  const enc = buf.slice(0, buf.length - 16)
+  const tag = buf.slice(buf.length - 16)
+  const d = createDecipheriv('aes-256-gcm', key, Buffer.from(iv))
+  d.setAAD(Buffer.from(aad))
+  d.setAuthTag(tag)
+  return Buffer.concat([d.update(enc), d.final()])
+}
+
+// Dekripsi payload secret (skema mengikuti decryptPollVote Baileys).
+// useCase string untuk edit belum resmi terdokumentasi -> coba beberapa kandidat.
+function decryptSecretEdit({ sec, messageSecret, meJid }) {
+  const targetId = sec.targetMessageKey.id
+  const origSender = keyAuthor(sec.targetMessageKey, meJid)
+  const editorJid = origSender // edit dikirim oleh pengirim pesan asli
+  const aad = Buffer.from(`${targetId}\u0000${editorJid}`)
+  const key0 = hmac256(Buffer.alloc(32), Buffer.from(messageSecret))
+  for (const useCase of ['Message Edit', 'Edit', 'message edit']) {
+    try {
+      const sign = Buffer.concat([
+        Buffer.from(targetId), Buffer.from(origSender), Buffer.from(editorJid),
+        Buffer.from(useCase), Buffer.from([1]),
+      ])
+      const decKey = hmac256(key0, sign)
+      const plain = gcmDecrypt(sec.encPayload, decKey, sec.encIv, aad)
+      const decoded = proto.Message.decode(plain)
+      const text = extractBody(decoded) || extractBody(decoded.editedMessage) ||
+        extractBody(decoded.protocolMessage?.editedMessage)
+      if (text != null) return { text, useCase }
+    } catch { /* coba useCase berikutnya */ }
   }
   return null
 }
@@ -370,15 +415,36 @@ async function persistMessage(msg, { isLive }) {
     return
   }
 
-  // Edit terenkripsi (secretEncryptedMessage): teks baru tak bisa dibaca tanpa
-  // messageSecret asli. Tandai pesan target sebagai "diedit" (tanpa ubah teks)
-  // & jangan simpan baris [media] sampah.
-  const secretEditId = getSecretEditTarget(msg.message)
-  if (secretEditId) {
-    const res = await supabase.from('messages')
-      .update({ edited: true })
-      .eq('wa_message_id', secretEditId)
+  // Edit terenkripsi (secretEncryptedMessage MESSAGE_EDIT). Coba dekripsi teks
+  // baru pakai messageSecret pesan asli; kalau gagal -> tandai "diedit" saja.
+  const secretEdit = getSecretEdit(msg.message)
+  if (secretEdit) {
+    const { data: orig } = await supabase.from('messages')
+      .select('id, conversation_id, body, edited, message_secret')
+      .eq('wa_message_id', secretEdit.targetMessageKey.id).maybeSingle()
+
+    let newBody = null
+    if (orig?.message_secret) {
+      try {
+        const meJid = jidNormalizedUser(sock?.user?.id || '')
+        const secretBuf = Buffer.from(orig.message_secret, 'base64')
+        const dec = decryptSecretEdit({ sec: secretEdit, messageSecret: secretBuf, meJid })
+        if (dec) { newBody = dec.text; console.log(`[Edit] dekripsi sukses (useCase=${dec.useCase})`) }
+        else console.warn('[Edit] dekripsi gagal untuk semua kandidat useCase')
+      } catch (e) { console.warn('[Edit] error dekripsi:', e.message) }
+    } else {
+      console.warn('[Edit] message_secret pesan asli tidak tersimpan, tak bisa dekripsi')
+    }
+
+    const patch = newBody != null ? { body: newBody, edited: true } : { edited: true }
+    let res = await supabase.from('messages').update(patch)
+      .eq('wa_message_id', secretEdit.targetMessageKey.id)
       .select('id, conversation_id, body, edited').maybeSingle()
+    if (res.error && newBody != null) {
+      res = await supabase.from('messages').update({ body: newBody })
+        .eq('wa_message_id', secretEdit.targetMessageKey.id)
+        .select('id, conversation_id, body').maybeSingle()
+    }
     if (!res.error && res.data) {
       const p = { message: res.data, conversationId: res.data.conversation_id }
       const pub = await publish('message_updated', p)
@@ -469,6 +535,15 @@ async function persistMessage(msg, { isLive }) {
     mediaFilename, mediaMimetype,
     replyToWaId, replyToBody, replyToFromMe,
   })
+
+  // Simpan messageSecret (untuk mendekripsi edit terenkripsi nanti). Best-effort:
+  // jika kolom belum ada, abaikan tanpa mengganggu penyimpanan pesan.
+  const messageSecret = msg.message?.messageContextInfo?.messageSecret
+  if (messageSecret && savedMessage?.id) {
+    const b64 = Buffer.from(messageSecret).toString('base64')
+    supabase.from('messages').update({ message_secret: b64 }).eq('id', savedMessage.id)
+      .then(({ error }) => { if (error) { /* kolom mungkin belum ada */ } }, () => {})
+  }
 
   const payload = { message: savedMessage, conversationId, contactId, contactName: contactName || phone, phone }
   const published = await publish('new_message', payload)
