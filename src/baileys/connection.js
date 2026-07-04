@@ -14,6 +14,7 @@ import { publish, redisAvailable } from '../db/redis.js'
 import { sendToAgents, sendToAll, isPushEnabled } from '../push/fcm.js'
 import { sendWebPushToAgents, sendWebPushToAll, isWebPushEnabled } from '../push/webpush.js'
 import { autoAssignConversation } from '../services/autoAssign.js'
+import { compressImage } from '../utils/media.js'
 import QRCode from 'qrcode'
 import fs from 'fs/promises'
 import path from 'path'
@@ -615,14 +616,25 @@ async function persistMessage(msg, { isLive }) {
   if (mediaInfo) {
     ;(async () => {
       try {
-        const buffer = await downloadMediaMessage(
+        let buffer = await downloadMediaMessage(
           msg, 'buffer', {},
           { logger: console, reuploadRequest: sock.updateMediaMessage }
         )
-        const mediaUrl = await uploadToStorage(buffer, storageFilename, mediaMimetype)
+        let uploadName = storageFilename
+        let uploadMime = mediaMimetype
+        // Kompres gambar sebelum simpan -> hemat storage
+        if (mediaInfo.type === 'image') {
+          const c = await compressImage(buffer, mediaMimetype)
+          if (c) {
+            buffer = c.buffer
+            uploadMime = c.mimetype
+            uploadName = storageFilename.replace(/\.[^.]+$/, `.${c.ext}`)
+          }
+        }
+        const mediaUrl = await uploadToStorage(buffer, uploadName, uploadMime)
         if (!mediaUrl) return
         const { data: updated } = await supabase
-          .from('messages').update({ media_url: mediaUrl }).eq('id', savedMessage.id).select().single()
+          .from('messages').update({ media_url: mediaUrl, media_mimetype: uploadMime }).eq('id', savedMessage.id).select().single()
         const upPayload = { message: updated || { ...savedMessage, media_url: mediaUrl }, conversationId, contactId }
         const pub2 = await publish('message_updated', upPayload)
         if (!pub2) ioInstance?.emit('message_updated', upPayload)

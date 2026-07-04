@@ -2,6 +2,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import { getSock, broadcast, bumpConvOutgoing } from '../baileys/connection.js';
 import { supabase } from '../db/supabase.js';
+import { compressImage } from '../utils/media.js';
 
 const router = Router();
 const upload = multer({
@@ -90,18 +91,30 @@ router.post('/send-media', upload.single('file'), async (req, res) => {
 
     const jid = conv.wa_jid;
     const mediaType = mediaTypeFromMime(file.mimetype);
-    const buffer = file.buffer;
+    let buffer = file.buffer;
+    let fileMime = file.mimetype;
+    let fileName = file.originalname;
     const caption_ = caption || undefined;
+
+    // Kompres gambar sebelum kirim & simpan -> hemat storage & bandwidth
+    if (mediaType === 'image') {
+      const c = await compressImage(buffer, file.mimetype);
+      if (c) {
+        buffer = c.buffer;
+        fileMime = c.mimetype;
+        fileName = file.originalname.replace(/\.[^.]+$/, `.${c.ext}`);
+      }
+    }
 
     let baileysMsg;
     if (mediaType === 'image') {
-      baileysMsg = { image: buffer, caption: caption_, mimetype: file.mimetype };
+      baileysMsg = { image: buffer, caption: caption_, mimetype: fileMime };
     } else if (mediaType === 'video') {
-      baileysMsg = { video: buffer, caption: caption_, mimetype: file.mimetype };
+      baileysMsg = { video: buffer, caption: caption_, mimetype: fileMime };
     } else if (mediaType === 'audio') {
-      baileysMsg = { audio: buffer, mimetype: file.mimetype, ptt: false };
+      baileysMsg = { audio: buffer, mimetype: fileMime, ptt: false };
     } else {
-      baileysMsg = { document: buffer, fileName: file.originalname, mimetype: file.mimetype, caption: caption_ };
+      baileysMsg = { document: buffer, fileName, mimetype: fileMime, caption: caption_ };
     }
 
     const sentResult = await sock.sendMessage(jid, baileysMsg, buildQuotedOpts(jid, replyTo));
@@ -109,10 +122,10 @@ router.post('/send-media', upload.single('file'), async (req, res) => {
 
     let mediaUrl = null;
     try {
-      const storageFilename = `${Date.now()}-${file.originalname}`;
+      const storageFilename = `${Date.now()}-${fileName}`;
       const { error: uploadErr } = await supabase.storage
         .from('wa-media')
-        .upload(storageFilename, buffer, { contentType: file.mimetype, upsert: true });
+        .upload(storageFilename, buffer, { contentType: fileMime, upsert: true });
       if (!uploadErr) {
         const { data: { publicUrl } } = supabase.storage.from('wa-media').getPublicUrl(storageFilename);
         mediaUrl = publicUrl;
@@ -132,8 +145,8 @@ router.post('/send-media', upload.single('file'), async (req, res) => {
         wa_message_id: waMessageId,
         media_type: mediaType,
         media_url: mediaUrl,
-        media_filename: file.originalname,
-        media_mimetype: file.mimetype,
+        media_filename: fileName,
+        media_mimetype: fileMime,
         reply_to_wa_id: replyTo?.wa_message_id || null,
         reply_to_body: replyTo?.body || null,
         reply_to_from_me: replyTo?.from_me ?? null,
