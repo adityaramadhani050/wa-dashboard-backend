@@ -146,9 +146,12 @@ function extractBody(message) {
 // dibungkus editedMessage.
 function getEditInfo(message) {
   if (!message) return null
-  const proto = message.protocolMessage || message.editedMessage?.message?.protocolMessage
-  if (proto?.editedMessage && proto.key?.id) {
-    return { originalId: proto.key.id, newContent: proto.editedMessage }
+  // Edit bisa datang langsung sbg protocolMessage, atau dibungkus editedMessage.message
+  const container = message.editedMessage?.message || message
+  const proto = container.protocolMessage
+  // type 14 = MESSAGE_EDIT
+  if (proto && (proto.type === 14 || proto.editedMessage) && proto.key?.id) {
+    return { originalId: proto.key.id, newContent: proto.editedMessage || null }
   }
   return null
 }
@@ -398,6 +401,15 @@ async function persistMessage(msg, { isLive }) {
   const body = extractBody(msg.message)
   const timestamp = msg.messageTimestamp
   const mediaInfo = getMediaInfo(msg.message)
+
+  // Diagnostik: pesan tanpa teks & tanpa media terdeteksi -> tersimpan '[media]'.
+  // Log struktur agar tipe pesan yang belum ditangani (mis. edit) bisa dikenali.
+  if (body == null && !mediaInfo) {
+    try {
+      console.warn('[UnknownMsg] keys=', Object.keys(msg.message),
+        'sample=', JSON.stringify(msg.message).slice(0, 600))
+    } catch {}
+  }
 
   const ctx = getContextInfo(msg.message)
   let replyToWaId = null, replyToBody = null, replyToFromMe = null
