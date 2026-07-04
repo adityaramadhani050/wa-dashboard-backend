@@ -2,7 +2,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import { getSock, broadcast, bumpConvOutgoing } from '../baileys/connection.js';
 import { supabase } from '../db/supabase.js';
-import { compressImage } from '../utils/media.js';
+import { compressImage, makeThumbnail } from '../utils/media.js';
 
 const router = Router();
 const upload = multer({
@@ -121,6 +121,7 @@ router.post('/send-media', upload.single('file'), async (req, res) => {
     const waMessageId = sentResult?.key?.id || null;
 
     let mediaUrl = null;
+    let thumbUrl = null;
     try {
       const storageFilename = `${Date.now()}-${fileName}`;
       const { error: uploadErr } = await supabase.storage
@@ -129,6 +130,16 @@ router.post('/send-media', upload.single('file'), async (req, res) => {
       if (!uploadErr) {
         const { data: { publicUrl } } = supabase.storage.from('wa-media').getPublicUrl(storageFilename);
         mediaUrl = publicUrl;
+      }
+      // Thumbnail untuk preview cepat (best-effort)
+      if (mediaType === 'image') {
+        const t = await makeThumbnail(buffer, fileMime);
+        if (t) {
+          const thumbName = `thumb_${storageFilename}`;
+          const { error: te } = await supabase.storage.from('wa-media')
+            .upload(thumbName, t.buffer, { contentType: t.mimetype, upsert: true });
+          if (!te) thumbUrl = supabase.storage.from('wa-media').getPublicUrl(thumbName).data.publicUrl;
+        }
       }
     } catch (e) {
       console.warn('[Media] Storage upload error:', e.message);
@@ -154,6 +165,12 @@ router.post('/send-media', upload.single('file'), async (req, res) => {
       .select().single();
 
     if (error) throw error;
+
+    // Simpan media_thumb_url (best-effort; kolom mungkin belum ada)
+    if (thumbUrl) {
+      await supabase.from('messages').update({ media_thumb_url: thumbUrl }).eq('id', saved.id)
+        .then(({ error: e }) => { if (!e) saved.media_thumb_url = thumbUrl; }, () => {});
+    }
 
     await bumpConvOutgoing(conversation_id, caption || `[${mediaType}]`);
 

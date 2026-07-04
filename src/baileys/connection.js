@@ -14,7 +14,7 @@ import { publish, redisAvailable } from '../db/redis.js'
 import { sendToAgents, sendToAll, isPushEnabled } from '../push/fcm.js'
 import { sendWebPushToAgents, sendWebPushToAll, isWebPushEnabled } from '../push/webpush.js'
 import { autoAssignConversation } from '../services/autoAssign.js'
-import { compressImage } from '../utils/media.js'
+import { compressImage, makeThumbnail } from '../utils/media.js'
 import QRCode from 'qrcode'
 import fs from 'fs/promises'
 import path from 'path'
@@ -633,9 +633,20 @@ async function persistMessage(msg, { isLive }) {
         }
         const mediaUrl = await uploadToStorage(buffer, uploadName, uploadMime)
         if (!mediaUrl) return
+        // Thumbnail kecil untuk preview cepat (best-effort)
+        let thumbUrl = null
+        if (mediaInfo.type === 'image') {
+          const t = await makeThumbnail(buffer, uploadMime)
+          if (t) thumbUrl = await uploadToStorage(t.buffer, `thumb_${uploadName}`, t.mimetype)
+        }
         const { data: updated } = await supabase
           .from('messages').update({ media_url: mediaUrl, media_mimetype: uploadMime }).eq('id', savedMessage.id).select().single()
-        const upPayload = { message: updated || { ...savedMessage, media_url: mediaUrl }, conversationId, contactId }
+        // media_thumb_url terpisah (kolom mungkin belum ada -> best-effort)
+        if (thumbUrl) {
+          supabase.from('messages').update({ media_thumb_url: thumbUrl }).eq('id', savedMessage.id).then(() => {}, () => {})
+        }
+        const baseMsg = updated || { ...savedMessage, media_url: mediaUrl }
+        const upPayload = { message: { ...baseMsg, media_thumb_url: thumbUrl || baseMsg.media_thumb_url || null }, conversationId, contactId }
         const pub2 = await publish('message_updated', upPayload)
         if (!pub2) ioInstance?.emit('message_updated', upPayload)
       } catch (err) {
