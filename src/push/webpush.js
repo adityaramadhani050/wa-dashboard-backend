@@ -36,8 +36,8 @@ async function sendToSubs(rows, payload, label = '') {
     return;
   }
   const body = JSON.stringify(payload);
-  const dead = [];
-  let ok = 0, fail = 0;
+  const deadIds = [];
+  let ok = 0, fail = 0, expired = 0;
   await Promise.all(
     rows.map(async (row) => {
       try {
@@ -47,15 +47,22 @@ async function sendToSubs(rows, payload, label = '') {
       } catch (e) {
         fail++;
         const code = e?.statusCode;
-        console.warn(`[WebPush] gagal kirim (status=${code}): ${String(e?.body || e?.message || e).slice(0, 120)}`);
-        // 404/410 = subscription kedaluwarsa → hapus
-        if (code === 404 || code === 410) dead.push(row.token);
+        // 404/410 = subscription kedaluwarsa → hapus (jangan spam log per-item)
+        if (code === 404 || code === 410) {
+          expired++;
+          if (row.id != null) deadIds.push(row.id);
+        } else {
+          console.warn(`[WebPush] gagal kirim (status=${code}): ${String(e?.body || e?.message || e).slice(0, 120)}`);
+        }
       }
     })
   );
-  console.log(`[WebPush] ${label} terkirim ok=${ok} gagal=${fail} dihapus=${dead.length}`);
-  if (dead.length) {
-    await supabase.from('device_tokens').delete().in('token', dead);
+  console.log(`[WebPush] ${label} terkirim ok=${ok} gagal=${fail} (kedaluwarsa=${expired})`);
+  if (deadIds.length) {
+    const { error, count } = await supabase
+      .from('device_tokens').delete({ count: 'exact' }).in('id', deadIds);
+    if (error) console.warn(`[WebPush] gagal hapus langganan mati: ${error.message} (cek RLS/permission device_tokens)`);
+    else console.log(`[WebPush] hapus ${count ?? deadIds.length} langganan kedaluwarsa`);
   }
 }
 
@@ -64,7 +71,7 @@ export async function sendWebPushToAgent(agentId, payload) {
   if (!init() || !agentId) return;
   const { data } = await supabase
     .from('device_tokens')
-    .select('token')
+    .select('id, token')
     .eq('agent_id', agentId)
     .eq('platform', 'web');
   await sendToSubs(data || [], payload, `agent=${agentId}`);
@@ -75,7 +82,7 @@ export async function sendWebPushToAgents(agentIds, payload) {
   if (!init() || !agentIds?.length) return;
   const { data } = await supabase
     .from('device_tokens')
-    .select('token')
+    .select('id, token')
     .in('agent_id', agentIds)
     .eq('platform', 'web');
   await sendToSubs(data || [], payload, `agents=[${agentIds.length}]`);
@@ -86,7 +93,7 @@ export async function sendWebPushToAll(payload) {
   if (!init()) return;
   const { data } = await supabase
     .from('device_tokens')
-    .select('token')
+    .select('id, token')
     .eq('platform', 'web');
   await sendToSubs(data || [], payload, 'all');
 }
