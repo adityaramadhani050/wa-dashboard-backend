@@ -23,6 +23,19 @@ import { fileURLToPath } from 'url'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const AUTH_FOLDER = path.join(__dirname, '../../.wa_auth')
 
+// Logger senyap untuk Baileys (pino-compatible). Memakai `console` membuat
+// Baileys mencetak stack trace penuh untuk tiap operasi TRACE (mis. "updated
+// cache" / "loading from store") -> log jadi penuh & terlihat seperti error.
+// Di sini trace/debug/info di-nonaktifkan; hanya warn/error yang tampil.
+const waLogger = {
+  level: 'warn',
+  trace() {}, debug() {}, info() {},
+  warn: (...a) => console.warn('[WA]', ...a.filter(x => typeof x !== 'object')),
+  error: (...a) => console.error('[WA]', ...a.filter(x => typeof x !== 'object')),
+  fatal: (...a) => console.error('[WA]', ...a.filter(x => typeof x !== 'object')),
+  child() { return waLogger },
+}
+
 let sock = null
 let ioInstance = null
 let isConnected = false
@@ -643,7 +656,7 @@ async function persistMessage(msg, { isLive }) {
       try {
         let buffer = await downloadMediaMessage(
           msg, 'buffer', {},
-          { logger: console, reuploadRequest: sock.updateMediaMessage }
+          { logger: waLogger, reuploadRequest: sock.updateMediaMessage }
         )
         let uploadName = storageFilename
         let uploadMime = mediaMimetype
@@ -687,9 +700,10 @@ export async function connectToWhatsApp() {
 
   sock = makeWASocket({
     version,
+    logger: waLogger,
     auth: {
       creds: state.creds,
-      keys: makeCacheableSignalKeyStore(state.keys, console),
+      keys: makeCacheableSignalKeyStore(state.keys, waLogger),
     },
     printQRInTerminal: true,
     syncFullHistory: false,
