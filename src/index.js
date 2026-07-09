@@ -24,6 +24,18 @@ import { startAutoResolveJob } from './services/autoResolve.js'
 import { startMediaTtlJob } from './services/mediaTtl.js'
 import { subscriber, redisAvailable } from './db/redis.js'
 
+// Cegah proses mati karena error async internal Baileys yang tidak bisa kita
+// tangkap (mis. "Connection Closed" saat Baileys mengirim retry-request untuk
+// pesan yang gagal didekripsi tepat ketika koneksi sedang tertutup). Node 20
+// meng-crash proses pada unhandledRejection secara default -> cukup di-log.
+process.on('unhandledRejection', (reason) => {
+  const msg = reason?.message || reason
+  console.error('[unhandledRejection]', msg)
+})
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err?.message || err)
+})
+
 const PORT = process.env.PORT || 3000
 const app = express()
 const httpServer = createServer(app)
