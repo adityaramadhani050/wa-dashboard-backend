@@ -324,9 +324,11 @@ router.post('/:id/tags', async (req, res) => {
       throw error;
     }
 
-    // Tag "Non-Client" -> chat langsung Resolved (bukan calon klien, tak perlu balasan cepat)
+    // Tag "Non-Client" / "Deal" -> chat dianggap selesai, langsung Resolved
+    // (tidak boleh berstatus Aktif).
     const { data: tag } = await supabase.from('tags').select('name').eq('id', tag_id).maybeSingle();
-    if (tag && /non[\s_-]*client/i.test(tag.name || '')) {
+    const tagName = (tag?.name || '').toLowerCase();
+    if (/non[\s_-]*client/.test(tagName) || tagName === 'deal' || /\bdeal\b/.test(tagName)) {
       await supabase.from('conversations')
         .update({ status: 'resolved', updated_at: new Date().toISOString() })
         .eq('id', id);

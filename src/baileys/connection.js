@@ -66,8 +66,10 @@ export async function triggerSync() {
 export async function bumpConvOutgoing(conversationId, body) {
   const now = new Date().toISOString()
   try {
+    // Chat deal/non-client dianggap selesai -> jangan jadi Aktif, biarkan Resolved.
+    const closed = await closedTagState(conversationId)
     await supabase.from('conversations').update({
-      status: 'in_progress', updated_at: now,
+      status: closed ? 'resolved' : 'in_progress', updated_at: now,
       last_message: body || '[media]', last_message_at: now,
       last_from_me: true, awaiting_since: null,
     }).eq('id', conversationId)
@@ -128,6 +130,23 @@ async function hasNonClientTag(conversationId) {
     return (data || []).some((r) => /non[\s_-]*client/i.test(r.tags?.name || ''))
   } catch {
     return false
+  }
+}
+
+// Status "tertutup" berdasarkan tag: 'non_client' | 'deal' | null.
+// Chat deal/non-client dianggap selesai -> tidak boleh berstatus Aktif.
+async function closedTagState(conversationId) {
+  try {
+    const { data } = await supabase
+      .from('conversation_tags')
+      .select('tags (name)')
+      .eq('conversation_id', conversationId)
+    const names = (data || []).map((r) => (r.tags?.name || '').toLowerCase())
+    if (names.some((n) => /non[\s_-]*client/.test(n))) return 'non_client'
+    if (names.some((n) => n === 'deal' || /^deal\b/.test(n) || /\bdeal\b/.test(n))) return 'deal'
+    return null
+  } catch {
+    return null
   }
 }
 
@@ -586,10 +605,16 @@ async function persistMessage(msg, { isLive }) {
   if (isLive) {
     incrementDailyStats().catch(() => {})
     if (!fromMe) {
-      // Chat bertag "Non-Client": tetap Resolved selamanya, tidak reaktivasi,
-      // tidak auto-assign, tidak overdue (overdue dicek di frontend juga).
-      const skip = await hasNonClientTag(conversationId)
-      if (!skip) {
+      // Chat bertag Deal / Non-Client dianggap SELESAI -> tidak boleh Aktif.
+      // Paksa Resolved & lewati reaktivasi + auto-assign. Non-Client tanpa notif;
+      // Deal tetap diberi notif agar agent tahu ada balasan (mis. koordinasi kirim).
+      const closed = await closedTagState(conversationId)
+      if (closed) {
+        supabase.from('conversations').update({ status: 'resolved' })
+          .eq('id', conversationId).neq('status', 'resolved')
+          .then(() => {}, () => {})
+        if (closed === 'deal') pushNewMessage(payload).catch(() => {})
+      } else {
         // Reaktivasi chat resolved
         supabase.from('conversations').update({ status: 'in_progress' })
           .eq('id', conversationId).eq('status', 'resolved').not('assigned_to', 'is', null)
