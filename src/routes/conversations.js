@@ -24,11 +24,14 @@ router.get('/', async (req, res) => {
 
     const conversationIds = data.map((conv) => conv.id);
     const tagsByConversation = {};
-    if (conversationIds.length > 0) {
+    // Ambil tag per-batch (mencegah URL kepanjangan / limit baris saat percakapan
+    // banyak, mis. filter "Semua Agent" -> tanpa ini semua tag bisa hilang).
+    for (let i = 0; i < conversationIds.length; i += 150) {
+      const batch = conversationIds.slice(i, i + 150);
       const { data: convTags } = await supabase
         .from('conversation_tags')
         .select('conversation_id, tags (id, name, color)')
-        .in('conversation_id', conversationIds);
+        .in('conversation_id', batch);
 
       (convTags || []).forEach((ct) => {
         if (!tagsByConversation[ct.conversation_id]) tagsByConversation[ct.conversation_id] = [];
