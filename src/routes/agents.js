@@ -7,15 +7,42 @@ const router = Router();
 // List agents
 router.get('/', async (req, res) => {
   try {
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from('agents')
-      .select('id, name, username, email, role, created_at')
+      .select('id, name, username, email, role, available, created_at')
       .order('created_at', { ascending: false });
 
-    if (error) throw error;
+    if (error) {
+      // Kolom `available` mungkin belum ada -> fallback & default tersedia
+      ({ data, error } = await supabase
+        .from('agents')
+        .select('id, name, username, email, role, created_at')
+        .order('created_at', { ascending: false }));
+      if (error) throw error;
+      (data || []).forEach((a) => { a.available = true; });
+    }
     res.json(data || []);
   } catch (err) {
     console.error('GET /agents error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Set ketersediaan (aktif/non-aktif untuk auto-assign) agent tertentu (admin)
+router.patch('/:id/availability', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const available = !!req.body.available;
+    const { data, error } = await supabase
+      .from('agents')
+      .update({ available })
+      .eq('id', id)
+      .select('id, available')
+      .single();
+    if (error) throw error;
+    res.json(data);
+  } catch (err) {
+    console.error('PATCH /agents/:id/availability error:', err);
     res.status(500).json({ error: err.message });
   }
 });

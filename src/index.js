@@ -17,6 +17,7 @@ import aiRouter from './routes/ai.js'
 import productsRouter from './routes/products.js'
 import devicesRouter from './routes/devices.js'
 import settingsRouter from './routes/settings.js'
+import meRouter from './routes/me.js'
 import { requireAuth, requireAdmin } from './middleware/auth.js'
 import { getVapidPublicKey, isWebPushEnabled } from './push/webpush.js'
 import { isPushEnabled } from './push/fcm.js'
@@ -110,6 +111,7 @@ app.use('/api/ai', requireAuth, aiRouter)
 app.use('/api/products', requireAuth, productsRouter)
 app.use('/api/devices', requireAuth, devicesRouter)
 app.use('/api/settings', requireAuth, settingsRouter)
+app.use('/api/me', requireAuth, meRouter)
 
 app.post('/api/wa/sync', requireAuth, async (req, res) => {
   try {

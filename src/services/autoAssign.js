@@ -24,13 +24,19 @@ export function invalidateAutoAssignCache() {
   cache.at = 0;
 }
 
-// Beban tiap agent = jumlah percakapan aktif (open/in_progress) yang di-assign ke dia
+// Beban tiap agent = jumlah percakapan aktif (open/in_progress) yang di-assign ke dia.
+// Hanya agent yang TERSEDIA (available !== false) yang ikut auto-assign.
 async function agentLoads() {
-  const { data: agents } = await supabase
-    .from('agents')
-    .select('id, name')
-    .eq('role', 'agent');
-  if (!agents?.length) return [];
+  let ares = await supabase.from('agents').select('id, name, available').eq('role', 'agent');
+  let agents;
+  if (ares.error) {
+    // Kolom `available` belum ada -> anggap semua tersedia (kompatibilitas).
+    const fb = await supabase.from('agents').select('id, name').eq('role', 'agent');
+    agents = fb.data || [];
+  } else {
+    agents = (ares.data || []).filter((a) => a.available !== false); // null/true = tersedia
+  }
+  if (!agents.length) return [];
 
   const { data: convs } = await supabase
     .from('conversations')
