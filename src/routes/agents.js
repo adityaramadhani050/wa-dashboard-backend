@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { supabase } from '../db/supabase.js';
+import { invalidatePwdCache } from '../middleware/auth.js';
 
 const router = Router();
 
@@ -95,21 +96,36 @@ router.put('/:id', async (req, res) => {
     if (username) updates.username = username.trim().toLowerCase();
     if (email !== undefined) updates.email = email ? email.toLowerCase().trim() : null;
     if (role) updates.role = role;
-    if (password) updates.password_hash = await bcrypt.hash(password, 10);
+    let pwdChanged = false;
+    if (password) {
+      updates.password_hash = await bcrypt.hash(password, 10);
+      // Tandai waktu ganti password -> logout otomatis sesi lama di device lain.
+      updates.password_changed_at = new Date().toISOString();
+      pwdChanged = true;
+    }
 
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ error: 'Tidak ada field yang diupdate' });
     }
 
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from('agents')
       .update(updates)
       .eq('id', id)
       .select('id, name, username, email, role, created_at')
       .single();
 
+    // Fallback bila kolom password_changed_at belum ada
+    if (error && pwdChanged) {
+      delete updates.password_changed_at;
+      ({ data, error } = await supabase
+        .from('agents').update(updates).eq('id', id)
+        .select('id, name, username, email, role, created_at').single());
+    }
+
     if (error) throw error;
     if (!data) return res.status(404).json({ error: 'Agent tidak ditemukan' });
+    if (pwdChanged) invalidatePwdCache(id); // efek langsung, tak tunggu cache 30 dtk
     res.json(data);
   } catch (err) {
     console.error('PUT /agents/:id error:', err);
