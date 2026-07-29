@@ -3,7 +3,7 @@ import express from 'express'
 import { createServer } from 'http'
 import { Server } from 'socket.io'
 import cors from 'cors'
-import { connectToWhatsApp, setIO, getSock, getIsConnected, resetSession, triggerSync, getSyncing } from './baileys/connection.js'
+import { connectToWhatsApp, setIO, getSock, getIsConnected, resetSession, triggerSync, getSyncing, getLatestQr } from './baileys/connection.js'
 import conversationsRouter from './routes/conversations.js'
 import statsRouter from './routes/stats.js'
 import messagesRouter from './routes/messages.js'
@@ -135,6 +135,16 @@ io.on('connection', (socket) => {
   console.log('Dashboard client connected:', socket.id, '| transport:', socket.conn.transport.name)
   socket.emit('wa_status', { connected: getIsConnected() })
   socket.emit('wa_sync', { syncing: getSyncing() })
+  // Kirim QR terbaru bila WA belum tersambung -> dashboard yang baru buka
+  // halaman QR langsung dapat QR tanpa menunggu refresh berikutnya.
+  const qr = getLatestQr()
+  if (qr) socket.emit('qr', qr)
+  // Dashboard membuka halaman QR -> minta QR terbaru
+  socket.on('request_qr', () => {
+    const cur = getLatestQr()
+    socket.emit('wa_status', { connected: getIsConnected() })
+    if (cur) socket.emit('qr', cur)
+  })
   socket.on('disconnect', () => {
     console.log('Dashboard client disconnected:', socket.id)
   })

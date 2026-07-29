@@ -40,6 +40,9 @@ let sock = null
 let ioInstance = null
 let isConnected = false
 let syncing = false
+let latestQr = null // QR terbaru (data URL) — dikirim ke dashboard yang baru connect
+
+export function getLatestQr() { return isConnected ? null : latestQr }
 
 const lidToPhone = new Map()
 
@@ -705,7 +708,7 @@ export async function connectToWhatsApp() {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, waLogger),
     },
-    printQRInTerminal: true,
+    // printQRInTerminal dihapus (deprecated) — QR ditangani via connection.update
     syncFullHistory: false,
     getMessage: async (key) => {
       try {
@@ -750,8 +753,8 @@ export async function connectToWhatsApp() {
   sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
     if (qr) {
       try {
-        const qrDataURL = await QRCode.toDataURL(qr)
-        ioInstance?.emit('qr', qrDataURL)
+        latestQr = await QRCode.toDataURL(qr)
+        ioInstance?.emit('qr', latestQr)
       } catch (err) {
         console.error('QR generation error:', err)
       }
@@ -760,6 +763,7 @@ export async function connectToWhatsApp() {
     if (connection === 'open') {
       console.log('WhatsApp connected!')
       isConnected = true
+      latestQr = null
       ioInstance?.emit('wa_status', { connected: true })
       // Bila sedang sinkronisasi manual, beri waktu pesan offline mengalir lalu matikan indikator
       if (syncing) setTimeout(() => setSyncing(false), 8000)
