@@ -698,17 +698,24 @@ async function persistMessage(msg, { isLive }) {
   }
 }
 
-// Cache versi WA + timeout supaya fetch versi yang lambat tidak memblokir QR.
+// Ambil versi WA terbaru (WAJIB — versi usang ditolak WhatsApp dengan 405).
+// Di-cache agar reconnect tidak fetch ulang. Retry singkat bila gagal.
 let cachedWaVersion = null
 async function getWaVersion() {
   if (cachedWaVersion) return cachedWaVersion
-  try {
-    const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 3000))
-    const { version } = await Promise.race([fetchLatestBaileysVersion(), timeout])
-    cachedWaVersion = version
-  } catch {
-    cachedWaVersion = undefined // fallback -> pakai versi bawaan Baileys
+  for (let i = 0; i < 3; i++) {
+    try {
+      const { version } = await fetchLatestBaileysVersion()
+      cachedWaVersion = version
+      return cachedWaVersion
+    } catch (e) {
+      console.warn(`[WA] gagal ambil versi (percobaan ${i + 1}):`, e.message)
+      await new Promise((r) => setTimeout(r, 1500))
+    }
   }
+  // Tetap coba fetch sekali lagi (biarkan error naik bila benar-benar gagal)
+  const { version } = await fetchLatestBaileysVersion()
+  cachedWaVersion = version
   return cachedWaVersion
 }
 
@@ -791,6 +798,8 @@ export async function connectToWhatsApp() {
       const statusCode = lastDisconnect?.error?.output?.statusCode
       const loggedOut = statusCode === DisconnectReason.loggedOut
       console.warn(`[WA] connection close (statusCode=${statusCode}, loggedOut=${loggedOut}, fails=${reconnectFails})`)
+      // 405 = versi client ditolak WhatsApp -> ambil ulang versi terbaru
+      if (statusCode === 405) cachedWaVersion = null
       if (loggedOut) {
         // Sesi dihapus dari HP -> bersihkan & reconnect untuk QR baru
         reconnectFails = 0
