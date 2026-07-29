@@ -697,9 +697,23 @@ async function persistMessage(msg, { isLive }) {
   }
 }
 
+// Cache versi WA + timeout supaya fetch versi yang lambat tidak memblokir QR.
+let cachedWaVersion = null
+async function getWaVersion() {
+  if (cachedWaVersion) return cachedWaVersion
+  try {
+    const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 3000))
+    const { version } = await Promise.race([fetchLatestBaileysVersion(), timeout])
+    cachedWaVersion = version
+  } catch {
+    cachedWaVersion = undefined // fallback -> pakai versi bawaan Baileys
+  }
+  return cachedWaVersion
+}
+
 export async function connectToWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER)
-  const { version } = await fetchLatestBaileysVersion()
+  const version = await getWaVersion()
 
   sock = makeWASocket({
     version,
@@ -776,9 +790,12 @@ export async function connectToWhatsApp() {
       const loggedOut = statusCode === DisconnectReason.loggedOut
       if (loggedOut) {
         await clearAuthFolder()
-        setTimeout(() => connectToWhatsApp(), 1000)
+        setTimeout(() => connectToWhatsApp(), 500)
+      } else if (statusCode === DisconnectReason.restartRequired) {
+        // Normal setelah scan/awal koneksi -> reconnect cepat agar QR/sesi tampil segera
+        setTimeout(() => connectToWhatsApp(), 300)
       } else {
-        setTimeout(() => connectToWhatsApp(), 3000)
+        setTimeout(() => connectToWhatsApp(), 2000)
       }
     }
   })
