@@ -41,6 +41,7 @@ let ioInstance = null
 let isConnected = false
 let syncing = false
 let latestQr = null // QR terbaru (data URL) — dikirim ke dashboard yang baru connect
+let reconnectFails = 0 // hitung gagal reconnect beruntun -> reset sesi bila terlalu banyak
 
 export function getLatestQr() { return isConnected ? null : latestQr }
 
@@ -778,6 +779,7 @@ export async function connectToWhatsApp() {
       console.log('WhatsApp connected!')
       isConnected = true
       latestQr = null
+      reconnectFails = 0
       ioInstance?.emit('wa_status', { connected: true })
       // Bila sedang sinkronisasi manual, beri waktu pesan offline mengalir lalu matikan indikator
       if (syncing) setTimeout(() => setSyncing(false), 8000)
@@ -788,14 +790,28 @@ export async function connectToWhatsApp() {
       ioInstance?.emit('wa_status', { connected: false })
       const statusCode = lastDisconnect?.error?.output?.statusCode
       const loggedOut = statusCode === DisconnectReason.loggedOut
+      console.warn(`[WA] connection close (statusCode=${statusCode}, loggedOut=${loggedOut}, fails=${reconnectFails})`)
       if (loggedOut) {
+        // Sesi dihapus dari HP -> bersihkan & reconnect untuk QR baru
+        reconnectFails = 0
         await clearAuthFolder()
         setTimeout(() => connectToWhatsApp(), 500)
       } else if (statusCode === DisconnectReason.restartRequired) {
-        // Normal setelah scan/awal koneksi -> reconnect cepat agar QR/sesi tampil segera
+        // Normal setelah scan/awal koneksi -> reconnect cepat, jangan dihitung gagal
         setTimeout(() => connectToWhatsApp(), 300)
       } else {
-        setTimeout(() => connectToWhatsApp(), 2000)
+        // Gagal resume berulang (mis. sesi diambil alih / stream error) -> Baileys tak
+        // menghasilkan QR selama creds lama masih ada. Setelah beberapa kali gagal,
+        // reset sesi agar QR baru tampil (bisa scan ulang).
+        reconnectFails++
+        if (reconnectFails >= 5) {
+          console.warn('[WA] gagal reconnect berulang -> reset sesi untuk QR baru')
+          reconnectFails = 0
+          await clearAuthFolder()
+          setTimeout(() => connectToWhatsApp(), 500)
+        } else {
+          setTimeout(() => connectToWhatsApp(), 2000)
+        }
       }
     }
   })
