@@ -2,8 +2,21 @@ import { Router } from 'express';
 import { supabase } from '../db/supabase.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { invalidateAutoAssignCache, distributeUnassigned } from '../services/autoAssign.js';
+import { runMediaTtlAll } from '../services/mediaTtl.js';
 
 const router = Router();
+
+// Backfill hapus media lama (admin) — bebaskan storage sekaligus.
+router.post('/cleanup-media', requireAdmin, async (req, res) => {
+  try {
+    const days = Math.max(1, parseInt(req.body?.days, 10) || 60);
+    const deleted = await runMediaTtlAll(days);
+    res.json({ success: true, deleted, days });
+  } catch (err) {
+    console.error('POST /settings/cleanup-media error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // Status auto-assign (semua user boleh baca)
 router.get('/auto-assign', async (req, res) => {
