@@ -351,4 +351,24 @@ router.post('/campaigns/:id/cancel', requireAdmin, async (req, res) => {
   }
 });
 
+// DELETE /campaigns/:id — hapus campaign (tidak boleh saat berjalan)
+router.delete('/campaigns/:id', requireAdmin, async (req, res) => {
+  try {
+    const { data: camp } = await supabase
+      .from('broadcast_campaigns').select('status').eq('id', req.params.id).maybeSingle();
+    if (!camp) return res.status(404).json({ error: 'Campaign tidak ditemukan' });
+    if (camp.status === 'running')
+      return res.status(409).json({ error: 'Jeda atau batalkan campaign dulu sebelum menghapus' });
+    // Hapus penerima (bila FK cascade belum ada) lalu campaign. Log broadcast
+    // sengaja dipertahankan untuk menjaga riwayat cooldown per nomor.
+    await supabase.from('broadcast_recipients').delete().eq('campaign_id', req.params.id);
+    const { error } = await supabase.from('broadcast_campaigns').delete().eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    console.error('DELETE /broadcast/campaigns/:id error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;
