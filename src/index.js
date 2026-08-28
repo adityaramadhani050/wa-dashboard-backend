@@ -18,11 +18,13 @@ import productsRouter from './routes/products.js'
 import devicesRouter from './routes/devices.js'
 import settingsRouter from './routes/settings.js'
 import meRouter from './routes/me.js'
+import broadcastRouter from './routes/broadcast.js'
 import { requireAuth, requireAdmin } from './middleware/auth.js'
 import { getVapidPublicKey, isWebPushEnabled } from './push/webpush.js'
 import { isPushEnabled } from './push/fcm.js'
 import { startAutoResolveJob } from './services/autoResolve.js'
 import { startMediaTtlJob } from './services/mediaTtl.js'
+import { startBroadcastWorker } from './services/broadcastWorker.js'
 import { subscriber, redisAvailable } from './db/redis.js'
 
 // Cegah proses mati karena error async internal Baileys yang tidak bisa kita
@@ -112,6 +114,7 @@ app.use('/api/products', requireAuth, productsRouter)
 app.use('/api/devices', requireAuth, devicesRouter)
 app.use('/api/settings', requireAuth, settingsRouter)
 app.use('/api/me', requireAuth, meRouter)
+app.use('/api/broadcast', requireAdmin, broadcastRouter)
 
 app.post('/api/wa/sync', requireAuth, async (req, res) => {
   try {
@@ -155,5 +158,6 @@ httpServer.listen(PORT, '0.0.0.0', async () => {
   setIO(io)
   startAutoResolveJob()
   startMediaTtlJob()
+  startBroadcastWorker()
   await connectToWhatsApp()
 })
