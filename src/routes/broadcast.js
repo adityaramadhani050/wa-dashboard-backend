@@ -1,12 +1,100 @@
 // Broadcasting — kirim pesan promo ke calon customer (chat resolved, bukan
 // Non-Client) yang dipilih manual admin, dengan proteksi anti-blokir.
 import { Router } from 'express';
+import multer from 'multer';
 import { supabase } from '../db/supabase.js';
 import { requireAdmin } from '../middleware/auth.js';
 
 const router = Router();
 
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 64 * 1024 * 1024 } });
+
 const NON_CLIENT_RE = /non[\s_-]*client/i;
+
+function mediaTypeFromMime(mime) {
+  if (!mime) return 'document';
+  if (mime.startsWith('image/')) return 'image';
+  if (mime.startsWith('video/')) return 'video';
+  if (mime.startsWith('audio/')) return 'audio';
+  return 'document';
+}
+
+async function uploadMedia(file) {
+  const storageFilename = `bcast-${Date.now()}-${file.originalname}`;
+  const { error } = await supabase.storage
+    .from('wa-media')
+    .upload(storageFilename, file.buffer, { contentType: file.mimetype, upsert: true });
+  if (error) throw error;
+  const { data: { publicUrl } } = supabase.storage.from('wa-media').getPublicUrl(storageFilename);
+  return {
+    media_url: publicUrl,
+    media_type: mediaTypeFromMime(file.mimetype),
+    media_filename: file.originalname,
+    media_mimetype: file.mimetype,
+  };
+}
+
+// ── Template Broadcast (pesan siap-pakai untuk campaign) ─────────────────────
+router.get('/templates', requireAdmin, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('broadcast_templates').select('*').order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) {
+    console.error('GET /broadcast/templates error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/templates', requireAdmin, upload.single('file'), async (req, res) => {
+  try {
+    const name = String(req.body?.name || '').trim();
+    const body = typeof req.body?.body === 'string' ? req.body.body : '';
+    if (!name) return res.status(400).json({ error: 'Nama template wajib diisi' });
+    let media = {};
+    if (req.file) media = await uploadMedia(req.file);
+    else if (!body.trim()) return res.status(400).json({ error: 'Isi pesan atau media wajib diisi' });
+    const { data, error } = await supabase
+      .from('broadcast_templates')
+      .insert({ name, body, ...media })
+      .select().single();
+    if (error) throw error;
+    res.status(201).json(data);
+  } catch (err) {
+    console.error('POST /broadcast/templates error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.put('/templates/:id', requireAdmin, upload.single('file'), async (req, res) => {
+  try {
+    const patch = {};
+    if (typeof req.body?.name === 'string') patch.name = req.body.name.trim();
+    if (typeof req.body?.body === 'string') patch.body = req.body.body;
+    if (req.file) Object.assign(patch, await uploadMedia(req.file));
+    else if (req.body?.remove_media === 'true')
+      Object.assign(patch, { media_url: null, media_type: null, media_filename: null, media_mimetype: null });
+    const { data, error } = await supabase
+      .from('broadcast_templates').update(patch).eq('id', req.params.id).select().single();
+    if (error) throw error;
+    res.json(data);
+  } catch (err) {
+    console.error('PUT /broadcast/templates/:id error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete('/templates/:id', requireAdmin, async (req, res) => {
+  try {
+    const { error } = await supabase.from('broadcast_templates').delete().eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    console.error('DELETE /broadcast/templates/:id error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // GET /candidates?cooldown_days=14
 // Daftar chat resolved (bukan Non-Client) + status cooldown tiap nomor.
@@ -121,12 +209,22 @@ router.post('/campaigns', requireAdmin, async (req, res) => {
     const b = req.body || {};
     const name = String(b.name || '').trim();
     if (!name) return res.status(400).json({ error: 'Nama campaign wajib diisi' });
-    const messageType = ['text', 'template', 'quick_media'].includes(b.message_type) ? b.message_type : 'text';
-    const messageBody = typeof b.message_body === 'string' ? b.message_body : '';
-    if (messageType === 'quick_media' && !b.quick_media_id)
-      return res.status(400).json({ error: 'quick_media_id wajib untuk campaign media' });
-    if (messageType !== 'quick_media' && !messageBody.trim())
-      return res.status(400).json({ error: 'Isi pesan wajib diisi' });
+
+    // Pesan campaign berasal dari Template Broadcast
+    if (!b.broadcast_template_id) return res.status(400).json({ error: 'Pilih template broadcast' });
+    const { data: tpl, error: tplErr } = await supabase
+      .from('broadcast_templates').select('*').eq('id', b.broadcast_template_id).single();
+    if (tplErr || !tpl) return res.status(404).json({ error: 'Template broadcast tidak ditemukan' });
+    const messageBody = tpl.body || '';
+    const messageType = tpl.media_url ? 'quick_media' : 'text';
+    const media = {
+      media_type: tpl.media_type || null,
+      media_url: tpl.media_url || null,
+      media_filename: tpl.media_filename || null,
+      media_mimetype: tpl.media_mimetype || null,
+    };
+    if (!messageBody.trim() && !media.media_url)
+      return res.status(400).json({ error: 'Template kosong (tidak ada teks/media)' });
 
     const recipients = Array.isArray(b.recipients) ? b.recipients : [];
     if (recipients.length === 0) return res.status(400).json({ error: 'Pilih minimal satu penerima' });
@@ -167,9 +265,13 @@ router.post('/campaigns', requireAdmin, async (req, res) => {
       .from('broadcast_campaigns')
       .insert({
         name,
+        broadcast_template_id: b.broadcast_template_id,
         message_type: messageType,
         message_body: messageBody,
-        quick_media_id: b.quick_media_id || null,
+        media_type: media.media_type,
+        media_url: media.media_url,
+        media_filename: media.media_filename,
+        media_mimetype: media.media_mimetype,
         status,
         daily_limit: dailyLimit,
         cooldown_days: cooldownDays,

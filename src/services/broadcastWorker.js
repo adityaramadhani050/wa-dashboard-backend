@@ -115,13 +115,14 @@ async function bumpCampaign(id, field) {
 
 async function buildBaileysMsg(campaign, name) {
   const caption = personalize(campaign.message_body, name);
-  if (campaign.message_type === 'quick_media' && campaign.quick_media_id) {
-    const { data: qm } = await supabase
-      .from('quick_media').select('*').eq('id', campaign.quick_media_id).single();
-    if (!qm) return null;
+  if (campaign.media_url) {
+    const qm = {
+      media_type: campaign.media_type, media_url: campaign.media_url,
+      label: campaign.media_filename, mimetype: campaign.media_mimetype,
+    };
     if (qm.media_type === 'image') return { msg: { image: { url: qm.media_url }, caption }, qm };
     if (qm.media_type === 'video') return { msg: { video: { url: qm.media_url }, caption, mimetype: qm.mimetype }, qm };
-    return { msg: { document: { url: qm.media_url }, mimetype: qm.mimetype, fileName: qm.label, caption }, qm };
+    return { msg: { document: { url: qm.media_url }, mimetype: qm.mimetype, fileName: qm.label || 'file', caption }, qm };
   }
   return { msg: { text: caption || '' }, qm: null };
 }
