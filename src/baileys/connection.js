@@ -198,6 +198,64 @@ function extractBody(message) {
   )
 }
 
+// Ambil nomor telepon dari vCard (format kontak WhatsApp).
+function phoneFromVcard(vcard) {
+  if (!vcard) return null
+  // waid=62812... pada baris TEL, atau nomor setelah ':' di baris TEL
+  const waid = vcard.match(/waid=(\d+)/i)
+  if (waid) return waid[1]
+  const tel = vcard.match(/TEL[^:]*:([+\d][\d\s-]+)/i)
+  if (tel) return tel[1].replace(/[\s-]/g, '')
+  return null
+}
+
+// Parse pesan KONTAK & LOKASI (yang tidak ditangani extractBody/getMediaInfo).
+// Mengembalikan { type, body, url, filename } atau null. Disimpan memakai kolom
+// media_type/media_url/media_filename yang sudah ada (tanpa perubahan skema).
+function parseSpecial(message) {
+  if (!message) return null
+  // Kontak tunggal
+  if (message.contactMessage) {
+    const c = message.contactMessage
+    const phone = phoneFromVcard(c.vcard)
+    const name = c.displayName || phone || 'Kontak'
+    return {
+      type: 'contact',
+      body: `📇 ${name}${phone ? ` — +${String(phone).replace(/^\+/, '')}` : ''}`,
+      url: phone ? `https://wa.me/${String(phone).replace(/\D/g, '')}` : null,
+      filename: phone || null,
+    }
+  }
+  // Beberapa kontak sekaligus
+  if (message.contactsArrayMessage) {
+    const arr = message.contactsArrayMessage.contacts || []
+    const first = arr[0]
+    const phone = first ? phoneFromVcard(first.vcard) : null
+    const names = arr.map((c) => c.displayName).filter(Boolean).slice(0, 3).join(', ')
+    return {
+      type: 'contact',
+      body: `📇 ${arr.length} kontak${names ? `: ${names}${arr.length > 3 ? '…' : ''}` : ''}`,
+      url: phone ? `https://wa.me/${String(phone).replace(/\D/g, '')}` : null,
+      filename: phone || null,
+    }
+  }
+  // Lokasi (statis) & lokasi langsung (live)
+  const loc = message.locationMessage || message.liveLocationMessage
+  if (loc && (loc.degreesLatitude != null || loc.degreesLongitude != null)) {
+    const lat = loc.degreesLatitude
+    const lng = loc.degreesLongitude
+    const live = !!message.liveLocationMessage
+    const place = loc.name || loc.address || 'Lokasi'
+    return {
+      type: 'location',
+      body: `📍 ${live ? 'Lokasi langsung' : place}`,
+      url: `https://www.google.com/maps?q=${lat},${lng}`,
+      filename: loc.address || loc.name || `${lat},${lng}`,
+    }
+  }
+  return null
+}
+
 // Deteksi pesan yang diedit (dari WhatsApp). Mengembalikan id pesan asli &
 // konten baru, atau null. Edit bisa datang langsung sbg protocolMessage atau
 // dibungkus editedMessage.
@@ -549,10 +607,12 @@ async function persistMessage(msg, { isLive }) {
   const body = extractBody(msg.message)
   const timestamp = msg.messageTimestamp
   const mediaInfo = getMediaInfo(msg.message)
+  // Kontak & lokasi (bukan file) -> tidak diunduh, cukup disimpan info-nya.
+  const special = !mediaInfo ? parseSpecial(msg.message) : null
 
   // Diagnostik: pesan tanpa teks & tanpa media terdeteksi -> tersimpan '[media]'.
   // Log struktur agar tipe pesan yang belum ditangani (mis. edit) bisa dikenali.
-  if (body == null && !mediaInfo) {
+  if (body == null && !mediaInfo && !special) {
     try {
       console.warn('[UnknownMsg] keys=', Object.keys(msg.message),
         'sample=', JSON.stringify(msg.message).slice(0, 600))
@@ -571,7 +631,7 @@ async function persistMessage(msg, { isLive }) {
 
   const mediaMimetype = mediaInfo ? (mediaInfo.msgObj.mimetype || 'application/octet-stream') : null
   const storageFilename = mediaInfo ? `${Date.now()}-${waMessageId}.${mediaInfo.ext}` : null
-  const mediaFilename = mediaInfo ? (mediaInfo.filename || storageFilename) : null
+  const mediaFilename = mediaInfo ? (mediaInfo.filename || storageFilename) : (special?.filename || null)
 
   const { contactId, conversationId } = await withPhoneLock(phone, async () => {
     const cId = await upsertContact(phone, contactName)
@@ -582,10 +642,10 @@ async function persistMessage(msg, { isLive }) {
 
   const savedMessage = await saveMessage({
     conversationId, fromMe,
-    body: body || (mediaInfo ? `[${mediaInfo.type}]` : '[media]'),
+    body: body || special?.body || (mediaInfo ? `[${mediaInfo.type}]` : '[media]'),
     timestamp, waMessageId,
-    mediaType: mediaInfo?.type || null,
-    mediaUrl: null,
+    mediaType: mediaInfo?.type || special?.type || null,
+    mediaUrl: special?.url || null,
     mediaFilename, mediaMimetype,
     replyToWaId, replyToBody, replyToFromMe,
   })
@@ -606,7 +666,7 @@ async function persistMessage(msg, { isLive }) {
 
   // Denormalisasi ringkasan percakapan (mempercepat daftar chat -> 1 query).
   const tsIso = new Date((Number(timestamp) || Math.floor(Date.now() / 1000)) * 1000).toISOString()
-  const summaryBody = body || (mediaInfo ? `[${mediaInfo.type}]` : '[media]')
+  const summaryBody = body || special?.body || (mediaInfo ? `[${mediaInfo.type}]` : '[media]')
   const convSummary = {
     updated_at: new Date().toISOString(),
     last_message: summaryBody,
