@@ -3,7 +3,16 @@ import express from 'express'
 import { createServer } from 'http'
 import { Server } from 'socket.io'
 import cors from 'cors'
+import helmet from 'helmet'
+import rateLimit from 'express-rate-limit'
 import { connectToWhatsApp, setIO, getSock, getIsConnected, resetSession, triggerSync, getSyncing, getLatestQr } from './baileys/connection.js'
+
+// Allowlist origin CORS. Set CORS_ORIGINS (dipisah koma) di Railway ke domain
+// frontend (mis. https://app.vercel.app). Jika belum diset, izinkan semua agar
+// tidak memutus layanan yang sudah jalan.
+const ALLOWED_ORIGINS = String(process.env.CORS_ORIGINS || '')
+  .split(',').map((s) => s.trim()).filter(Boolean)
+const corsOrigin = ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS : '*'
 import conversationsRouter from './routes/conversations.js'
 import statsRouter from './routes/stats.js'
 import messagesRouter from './routes/messages.js'
@@ -45,7 +54,7 @@ const httpServer = createServer(app)
 
 const io = new Server(httpServer, {
   cors: {
-    origin: '*',
+    origin: corsOrigin,
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: false,
@@ -75,12 +84,24 @@ if (redisAvailable && subscriber) {
   console.log('[Redis] Not configured — using direct Socket.io emit')
 }
 
+app.use(helmet({
+  crossOriginResourcePolicy: false, // API JSON lintas-origin (frontend beda domain)
+  contentSecurityPolicy: false,     // tidak menyajikan HTML dari sini
+}))
 app.use(cors({
-  origin: '*',
+  origin: corsOrigin,
   methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }))
 app.use(express.json())
+
+// Rate limit login: cegah brute-force password (20 percobaan / 15 menit / IP)
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, max: 20,
+  standardHeaders: true, legacyHeaders: false,
+  message: { error: 'Terlalu banyak percobaan login. Coba lagi dalam beberapa menit.' },
+})
+app.use('/api/auth/login', loginLimiter)
 
 // VAPID public key untuk web push (terbuka — bukan rahasia)
 app.get('/api/push/vapid-public-key', (req, res) => {

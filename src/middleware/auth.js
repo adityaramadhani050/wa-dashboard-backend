@@ -2,6 +2,14 @@ import jwt from 'jsonwebtoken';
 import { supabase } from '../db/supabase.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-insecure-secret-change-me';
+// Keamanan: di production wajib pakai JWT_SECRET nyata. Tanpa itu token bisa
+// dipalsukan. Fail-fast agar salah-konfigurasi ketahuan, bukan diam-diam rawan.
+if (!process.env.JWT_SECRET) {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('JWT_SECRET wajib diset di production (token bisa dipalsukan tanpa itu).');
+  }
+  console.warn('[auth] PERINGATAN: JWT_SECRET belum diset — memakai secret dev yang TIDAK aman.');
+}
 // Enforcement opt-in: selama 'false', token tetap diverifikasi & req.user diisi,
 // tapi request TIDAK diblokir (supaya rollout FE+BE tidak memutus aplikasi live).
 // Setelah kedua sisi terdeploy & terverifikasi, set AUTH_ENFORCED=true di Railway.
