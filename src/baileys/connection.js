@@ -21,7 +21,11 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const AUTH_FOLDER = path.join(__dirname, '../../.wa_auth')
+// Folder penyimpanan sesi/kunci WhatsApp. WAJIB diarahkan ke storage PERMANEN
+// (mis. Railway Volume) via env WA_AUTH_DIR agar sesi tidak hilang tiap
+// restart/redeploy — folder default di bawah project bersifat ephemeral di
+// Railway sehingga kunci enkripsi hilang -> penerima lihat "message unavailable".
+const AUTH_FOLDER = process.env.WA_AUTH_DIR || path.join(__dirname, '../../.wa_auth')
 
 // Logger senyap untuk Baileys (pino-compatible). Memakai `console` membuat
 // Baileys mencetak stack trace penuh untuk tiap operasi TRACE (mis. "updated
@@ -809,18 +813,14 @@ export async function connectToWhatsApp() {
         // Normal setelah scan/awal koneksi -> reconnect cepat, jangan dihitung gagal
         setTimeout(() => connectToWhatsApp(), 300)
       } else {
-        // Gagal resume berulang (mis. sesi diambil alih / stream error) -> Baileys tak
-        // menghasilkan QR selama creds lama masih ada. Setelah beberapa kali gagal,
-        // reset sesi agar QR baru tampil (bisa scan ulang).
+        // Gangguan sementara (stream error / jaringan / sesi diambil alih sesaat).
+        // JANGAN hapus auth di sini: menghapus creds sehat = kunci enkripsi berganti
+        // -> penerima lihat "message unavailable". Cukup reconnect dengan backoff;
+        // creds lama dipakai ulang sehingga sesi tetap sinkron. Reset sesi hanya
+        // saat benar-benar loggedOut (di atas) atau manual via POST /api/wa/reset.
         reconnectFails++
-        if (reconnectFails >= 5) {
-          console.warn('[WA] gagal reconnect berulang -> reset sesi untuk QR baru')
-          reconnectFails = 0
-          await clearAuthFolder()
-          setTimeout(() => connectToWhatsApp(), 500)
-        } else {
-          setTimeout(() => connectToWhatsApp(), 2000)
-        }
+        const delay = Math.min(2000 * reconnectFails, 30000) // 2s..30s
+        setTimeout(() => connectToWhatsApp(), delay)
       }
     }
   })
