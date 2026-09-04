@@ -263,8 +263,10 @@ router.post('/:id/messages', async (req, res) => {
 
     const tStart = Date.now();
 
-    // Reply/quote: bangun objek quoted minimal dari data pesan yang dibalas
-    const sendOpts = {};
+    // Reply/quote: bangun objek quoted minimal dari data pesan yang dibalas.
+    // generateHighQualityLinkPreview: buat kartu preview otomatis bila pesan
+    // mengandung URL (butuh dependency link-preview-js — terpasang saat deploy).
+    const sendOpts = { generateHighQualityLinkPreview: true };
     if (reply_to?.wa_message_id) {
       sendOpts.quoted = {
         key: { remoteJid: jid, fromMe: !!reply_to.from_me, id: reply_to.wa_message_id },

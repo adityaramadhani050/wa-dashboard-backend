@@ -496,4 +496,92 @@ router.post('/send-quick-media', async (req, res) => {
   }
 });
 
+// Resolusi JID dari conversation_id (dipakai kirim lokasi/kontak)
+async function resolveJid(conversationId) {
+  const { data: conv } = await supabase
+    .from('conversations').select('wa_jid, contact:contacts (phone)').eq('id', conversationId).single();
+  if (conv?.wa_jid) return conv.wa_jid;
+  const raw = conv?.contact?.phone;
+  if (!raw) return null;
+  return `${String(raw).split('@')[0]}@s.whatsapp.net`;
+}
+
+// Kirim LOKASI
+router.post('/send-location', async (req, res) => {
+  try {
+    const { conversation_id, latitude, longitude, name, address } = req.body;
+    if (!conversation_id) return res.status(400).json({ error: 'conversation_id wajib diisi' });
+    const lat = Number(latitude), lng = Number(longitude);
+    if (Number.isNaN(lat) || Number.isNaN(lng)) return res.status(400).json({ error: 'Koordinat tidak valid' });
+
+    const sock = getSock();
+    if (!sock) return res.status(503).json({ error: 'WhatsApp belum tersambung' });
+    const jid = await resolveJid(conversation_id);
+    if (!jid) return res.status(404).json({ error: 'Percakapan tidak ditemukan' });
+
+    const sent = await sock.sendMessage(jid, {
+      location: { degreesLatitude: lat, degreesLongitude: lng, name: name || undefined, address: address || undefined },
+    });
+    const place = name || address || 'Lokasi';
+    const body = `📍 ${place}`;
+    const mapUrl = `https://www.google.com/maps?q=${lat},${lng}`;
+
+    const { data: saved, error } = await supabase.from('messages').insert({
+      conversation_id, from_me: true, body,
+      timestamp: new Date().toISOString(), status: 'sent',
+      wa_message_id: sent?.key?.id || null,
+      media_type: 'location', media_url: mapUrl, media_filename: address || name || `${lat},${lng}`,
+    }).select().single();
+    if (error) throw error;
+
+    await bumpConvOutgoing(conversation_id, body);
+    broadcast('new_message', { message: saved, conversationId: conversation_id }).catch(() => {});
+    res.json({ success: true, message: saved });
+  } catch (err) {
+    console.error('POST /messages/send-location error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Kirim KONTAK
+router.post('/send-contact', async (req, res) => {
+  try {
+    const { conversation_id, name, phone } = req.body;
+    if (!conversation_id) return res.status(400).json({ error: 'conversation_id wajib diisi' });
+    const displayName = String(name || '').trim();
+    const digits = String(phone || '').replace(/\D/g, '');
+    if (!displayName || !digits) return res.status(400).json({ error: 'Nama & nomor wajib diisi' });
+
+    const sock = getSock();
+    if (!sock) return res.status(503).json({ error: 'WhatsApp belum tersambung' });
+    const jid = await resolveJid(conversation_id);
+    if (!jid) return res.status(404).json({ error: 'Percakapan tidak ditemukan' });
+
+    const vcard =
+      'BEGIN:VCARD\n' +
+      'VERSION:3.0\n' +
+      `FN:${displayName}\n` +
+      `TEL;type=CELL;type=VOICE;waid=${digits}:+${digits}\n` +
+      'END:VCARD';
+
+    const sent = await sock.sendMessage(jid, { contacts: { displayName, contacts: [{ vcard }] } });
+    const body = `📇 ${displayName} — +${digits}`;
+
+    const { data: saved, error } = await supabase.from('messages').insert({
+      conversation_id, from_me: true, body,
+      timestamp: new Date().toISOString(), status: 'sent',
+      wa_message_id: sent?.key?.id || null,
+      media_type: 'contact', media_url: `https://wa.me/${digits}`, media_filename: digits,
+    }).select().single();
+    if (error) throw error;
+
+    await bumpConvOutgoing(conversation_id, body);
+    broadcast('new_message', { message: saved, conversationId: conversation_id }).catch(() => {});
+    res.json({ success: true, message: saved });
+  } catch (err) {
+    console.error('POST /messages/send-contact error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;

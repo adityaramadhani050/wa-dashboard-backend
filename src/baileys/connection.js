@@ -327,6 +327,8 @@ function decryptSecretEdit({ sec, messageSecret, meJid }) {
 function getMediaInfo(message) {
   if (message.imageMessage)
     return { type: 'image', msgObj: message.imageMessage, ext: 'jpg', filename: null }
+  if (message.stickerMessage)
+    return { type: 'sticker', msgObj: message.stickerMessage, ext: 'webp', filename: null }
   if (message.videoMessage)
     return { type: 'video', msgObj: message.videoMessage, ext: 'mp4', filename: null }
   if (message.audioMessage) {
