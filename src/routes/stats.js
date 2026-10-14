@@ -156,7 +156,7 @@ router.get('/agents', async (req, res) => {
     }
 
     const [{ data: agentsList, error: ae }, { data: convs, error: ce }] = await Promise.all([
-      supabase.from('agents').select('id, name, email'),
+      supabase.from('agents').select('id, name, email, role'),
       convQuery,
     ]);
     if (ae) throw ae;
@@ -164,6 +164,7 @@ router.get('/agents', async (req, res) => {
 
     const agentById = {};
     for (const a of (agentsList || [])) {
+      if (a.role === 'admin') continue; // tampilkan hanya agent, bukan admin
       agentById[a.id] = {
         id: a.id, name: a.name, email: a.email,
         total: 0, open: 0, in_progress: 0, resolved: 0,
@@ -242,7 +243,6 @@ router.get('/agents', async (req, res) => {
     }
 
     const result = Object.values(agentById)
-      .filter(a => a.total > 0)
       .map(({ _responseTimes, ...a }) => ({
         ...a,
         lead: a.total,
