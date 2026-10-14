@@ -10,8 +10,14 @@ const router = Router();
 router.post('/cleanup-media', requireAdmin, async (req, res) => {
   try {
     const days = Math.max(1, parseInt(req.body?.days, 10) || 60);
-    const deleted = await runMediaTtlAll(days);
-    res.json({ success: true, deleted, days });
+    const { total, storageError } = await runMediaTtlAll(days);
+    if (storageError) {
+      return res.status(500).json({
+        error: `Gagal menghapus file dari storage: ${storageError}. Set SUPABASE_SERVICE_ROLE_KEY di server atau tambah policy DELETE untuk bucket wa-media.`,
+        deleted: total, days,
+      });
+    }
+    res.json({ success: true, deleted: total, days });
   } catch (err) {
     console.error('POST /settings/cleanup-media error:', err);
     res.status(500).json({ error: err.message });

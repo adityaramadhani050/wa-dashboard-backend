@@ -33,16 +33,29 @@ async function runMediaTtlBatch(ttlDays) {
     // Sertakan thumbnail bila ada (thumb_<path>)
     if (p) { paths.push(p, `thumb_${p}`); ids.push(m.id); }
   }
-  if (paths.length) await supabase.storage.from(BUCKET).remove(paths).catch(() => {});
+  // Hapus file fisik di storage. Jangan telan error diam-diam: kalau gagal
+  // (mis. izin DELETE kurang saat pakai anon key), file tidak terhapus padahal
+  // DB dikosongkan -> storage tak berkurang. Log agar ketahuan.
+  let storageError = null;
+  if (paths.length) {
+    const { error: remErr } = await supabase.storage.from(BUCKET).remove(paths);
+    if (remErr) {
+      storageError = remErr.message;
+      console.error('[MediaTTL] GAGAL hapus file storage:', remErr.message,
+        '-> pastikan SUPABASE_SERVICE_ROLE_KEY di-set atau ada policy DELETE untuk bucket.');
+    }
+  }
 
-  if (ids.length) {
+  // Hanya kosongkan referensi DB bila file benar-benar sudah dihapus dari
+  // storage; jika gagal, biarkan media_url agar bisa dicoba ulang nanti.
+  if (ids.length && !storageError) {
     let res = await supabase.from('messages')
       .update({ media_url: null, media_thumb_url: null, media_expired: true }).in('id', ids);
     if (res.error) {
       await supabase.from('messages').update({ media_url: null }).in('id', ids);
     }
   }
-  return { fetched, deleted: ids.length };
+  return { fetched, deleted: storageError ? 0 : ids.length, storageError };
 }
 
 // Kompatibilitas job berkala: proses satu batch, kembalikan jumlah dihapus.
@@ -60,17 +73,20 @@ export async function runMediaTtl(ttlDays) {
 // Backfill: hapus SEMUA media lebih lama dari TTL sekaligus (batch berulang).
 export async function runMediaTtlAll(ttlDays, { maxBatches = 400 } = {}) {
   let total = 0;
+  let storageError = null;
   try {
     for (let i = 0; i < maxBatches; i++) {
-      const { fetched, deleted } = await runMediaTtlBatch(ttlDays);
-      total += deleted;
-      if (fetched < 500) break; // batch terakhir
+      const r = await runMediaTtlBatch(ttlDays);
+      total += r.deleted;
+      if (r.storageError) { storageError = r.storageError; break; } // stop, jangan hammer
+      if (r.fetched < 500) break; // batch terakhir
     }
     console.log(`[MediaTTL] backfill selesai: ${total} media dihapus (>${ttlDays} hari)`);
   } catch (e) {
     console.warn('[MediaTTL] backfill gagal:', e.message);
+    storageError = storageError || e.message;
   }
-  return total;
+  return { total, storageError };
 }
 
 // Aktif hanya bila env MEDIA_TTL_DAYS di-set (>0). Cek berkala + sekali saat start.
