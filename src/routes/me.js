@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { supabase } from '../db/supabase.js';
+import { distributeUnassigned } from '../services/autoAssign.js';
 
 const router = Router();
 
@@ -28,6 +29,8 @@ router.patch('/availability', async (req, res) => {
       .from('agents').update({ available }).eq('id', id)
       .select('id, available').single();
     if (error) throw error;
+    // Kembali tersedia -> bagikan chat yang menunggu di antrian (termasuk antrian regional)
+    if (available) distributeUnassigned().catch(() => {});
     res.json(data);
   } catch (err) {
     console.error('PATCH /me/availability error:', err);

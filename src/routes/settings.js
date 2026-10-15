@@ -3,6 +3,7 @@ import { supabase } from '../db/supabase.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { invalidateAutoAssignCache, distributeUnassigned } from '../services/autoAssign.js';
 import { runMediaTtlAll } from '../services/mediaTtl.js';
+import { parseRegionalSettings, invalidateRegionalSettingsCache } from '../services/regionalBot.js';
 
 const router = Router();
 
@@ -101,6 +102,47 @@ router.put('/work-hours', requireAdmin, async (req, res) => {
     res.json(payload);
   } catch (err) {
     console.error('PUT /settings/work-hours error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Routing Regional (bot tanya lokasi -> agent Barat/Timur) ────────────────
+async function regionalStatus() {
+  // Info pendukung untuk UI: agent yang belum diberi regional tidak menerima lead baru.
+  const res = await supabase.from('agents').select('id, name, region, available').eq('role', 'agent');
+  if (res.error) return { migrated: false, agents_without_region: [], per_region: {} };
+  const agents = res.data || [];
+  const per_region = { barat: 0, timur: 0 };
+  agents.forEach((a) => { if (per_region[a.region] != null && a.available !== false) per_region[a.region]++; });
+  return {
+    migrated: true,
+    agents_without_region: agents.filter((a) => !a.region).map((a) => a.name),
+    per_region, // jumlah agent TERSEDIA per regional
+  };
+}
+
+router.get('/regional-routing', requireAdmin, async (req, res) => {
+  try {
+    const { data } = await supabase
+      .from('app_settings').select('value').eq('key', 'regional_routing').maybeSingle();
+    res.json({ ...parseRegionalSettings(data?.value), status: await regionalStatus() });
+  } catch (err) {
+    console.error('GET /settings/regional-routing error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.put('/regional-routing', requireAdmin, async (req, res) => {
+  try {
+    const payload = parseRegionalSettings(req.body || {});
+    const { error } = await supabase
+      .from('app_settings')
+      .upsert({ key: 'regional_routing', value: JSON.stringify(payload), updated_at: new Date().toISOString() }, { onConflict: 'key' });
+    if (error) throw error;
+    invalidateRegionalSettingsCache();
+    res.json({ ...payload, status: await regionalStatus() });
+  } catch (err) {
+    console.error('PUT /settings/regional-routing error:', err);
     res.status(500).json({ error: err.message });
   }
 });

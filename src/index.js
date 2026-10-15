@@ -34,6 +34,7 @@ import { isPushEnabled } from './push/fcm.js'
 import { startAutoResolveJob } from './services/autoResolve.js'
 import { startMediaTtlJob } from './services/mediaTtl.js'
 import { startBroadcastWorker } from './services/broadcastWorker.js'
+import { startRegionalBotJob } from './services/regionalBot.js'
 import { subscriber, redisAvailable } from './db/redis.js'
 
 // Cegah proses mati karena error async internal Baileys yang tidak bisa kita
@@ -66,7 +67,7 @@ const io = new Server(httpServer, {
 
 setIO(io)
 
-const REDIS_CHANNELS = ['new_message', 'message_status', 'message_updated', 'conversation_assigned']
+const REDIS_CHANNELS = ['new_message', 'message_status', 'message_updated', 'conversation_assigned', 'conversation_updated']
 
 if (redisAvailable && subscriber) {
   subscriber.subscribe(...REDIS_CHANNELS, (err) => {
@@ -180,5 +181,6 @@ httpServer.listen(PORT, '0.0.0.0', async () => {
   startAutoResolveJob()
   startMediaTtlJob()
   startBroadcastWorker()
+  startRegionalBotJob()
   await connectToWhatsApp()
 })

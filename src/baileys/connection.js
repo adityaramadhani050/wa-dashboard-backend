@@ -13,7 +13,7 @@ import { supabase } from '../db/supabase.js'
 import { publish, redisAvailable } from '../db/redis.js'
 import { sendToAgents, sendToAll, isPushEnabled } from '../push/fcm.js'
 import { sendWebPushToAgents, sendWebPushToAll, isWebPushEnabled } from '../push/webpush.js'
-import { autoAssignConversation } from '../services/autoAssign.js'
+import { routeIncoming, isBotMessageId } from '../services/regionalBot.js'
 import { compressImage, makeThumbnail } from '../utils/media.js'
 import QRCode from 'qrcode'
 import fs from 'fs/promises'
@@ -375,7 +375,7 @@ async function upsertContact(phone, pushName) {
     if (pushName && pushName !== phone && existing.name === existing.phone) {
       await supabase.from('contacts').update({ name: pushName }).eq('id', existing.id)
     }
-    return existing.id
+    return { id: existing.id, isNew: false }
   }
 
   const { data, error } = await supabase
@@ -385,7 +385,7 @@ async function upsertContact(phone, pushName) {
     .single()
 
   if (error) throw error
-  return data.id
+  return { id: data.id, isNew: true }
 }
 
 async function upsertConversation(contactId, waJid) {
@@ -458,7 +458,7 @@ async function incrementDailyStats() {
 // Aturan: ADMIN selalu dapat notifikasi semua chat; AGENT hanya dapat
 // notifikasi chat yang di-assign ke dirinya. Chat tanpa admin sama sekali
 // (edge case) -> kirim ke semua device.
-async function pushNewMessage(payload) {
+export async function pushNewMessage(payload) {
   if (!isPushEnabled() && !isWebPushEnabled()) return
   const { conversationId, contactName, phone, message } = payload
   const title = contactName || phone || 'Pesan baru'
@@ -581,6 +581,9 @@ async function persistMessage(msg, { isLive }) {
   const isGroup = jid.endsWith('@g.us')
   const waMessageId = msg.key.id
 
+  // Pesan keluar milik bot regional sudah disimpan oleh bot sendiri (bertanda sent_by_bot)
+  if (fromMe && isBotMessageId(waMessageId)) return
+
   if (waMessageId) {
     const { data: dup } = await supabase
       .from('messages').select('id').eq('wa_message_id', waMessageId).maybeSingle()
@@ -635,10 +638,10 @@ async function persistMessage(msg, { isLive }) {
   const storageFilename = mediaInfo ? `${Date.now()}-${waMessageId}.${mediaInfo.ext}` : null
   const mediaFilename = mediaInfo ? (mediaInfo.filename || storageFilename) : (special?.filename || null)
 
-  const { contactId, conversationId } = await withPhoneLock(phone, async () => {
-    const cId = await upsertContact(phone, contactName)
+  const { contactId, conversationId, isNewContact } = await withPhoneLock(phone, async () => {
+    const { id: cId, isNew } = await upsertContact(phone, contactName)
     const convId = await upsertConversation(cId, jid)
-    return { contactId: cId, conversationId: convId }
+    return { contactId: cId, conversationId: convId, isNewContact: isNew }
   })
   const tDb = Date.now()
 
@@ -698,24 +701,25 @@ async function persistMessage(msg, { isLive }) {
           .then(() => {}, () => {})
         if (closed === 'deal') pushNewMessage(payload).catch(() => {})
       } else {
-        // Reaktivasi chat resolved
-        supabase.from('conversations').update({ status: 'in_progress' })
-          .eq('id', conversationId).eq('status', 'resolved').not('assigned_to', 'is', null)
-          .then(() => {}, () => {})
-        supabase.from('conversations').update({ status: 'open' })
-          .eq('id', conversationId).eq('status', 'resolved').is('assigned_to', null)
-          .then(() => {}, () => {})
-        // Auto-assign + push
-        autoAssignConversation(conversationId)
-          .then(async (agent) => {
-            if (agent) {
-              const ap = { conversationId, agent }
-              const pub = await publish('conversation_assigned', ap)
-              if (!pub) ioInstance?.emit('conversation_assigned', ap)
-            }
-          })
-          .catch(() => null)
-          .finally(() => { pushNewMessage(payload).catch(() => {}) })
+        // Reaktivasi chat resolved (hasilnya dipakai untuk tahu customer "kembali")
+        const [reAssigned, reOpen] = await Promise.all([
+          supabase.from('conversations').update({ status: 'in_progress' })
+            .eq('id', conversationId).eq('status', 'resolved').not('assigned_to', 'is', null)
+            .select('id').maybeSingle(),
+          supabase.from('conversations').update({ status: 'open' })
+            .eq('id', conversationId).eq('status', 'resolved').is('assigned_to', null)
+            .select('id').maybeSingle(),
+        ]).catch(() => [{}, {}])
+        const wasResolved = !!(reAssigned?.data || reOpen?.data)
+        // Routing: bot lokasi regional / auto-assign (+ notifikasi push)
+        routeIncoming({
+          conversationId, contactId, jid, phone, contactName,
+          body: body || special?.body || null,
+          isNewContact, isGroup, wasResolved, payload,
+        }).catch((e) => {
+          console.warn('[Routing] gagal:', e?.message || e)
+          pushNewMessage(payload).catch(() => {})
+        })
       }
     }
   }

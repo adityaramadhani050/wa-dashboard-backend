@@ -2,17 +2,27 @@ import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { supabase } from '../db/supabase.js';
 import { invalidatePwdCache } from '../middleware/auth.js';
+import { distributeUnassigned } from '../services/autoAssign.js';
 
 const router = Router();
+
+const REGIONS = ['barat', 'timur'];
 
 // List agents
 router.get('/', async (req, res) => {
   try {
     let { data, error } = await supabase
       .from('agents')
-      .select('id, name, username, email, role, available, created_at')
+      .select('id, name, username, email, role, available, region, created_at')
       .order('created_at', { ascending: false });
 
+    if (error) {
+      // Kolom `region` mungkin belum dimigrasi
+      ({ data, error } = await supabase
+        .from('agents')
+        .select('id, name, username, email, role, available, created_at')
+        .order('created_at', { ascending: false }));
+    }
     if (error) {
       // Kolom `available` mungkin belum ada -> fallback & default tersedia
       ({ data, error } = await supabase
@@ -41,9 +51,32 @@ router.patch('/:id/availability', async (req, res) => {
       .select('id, available')
       .single();
     if (error) throw error;
+    // Agent kembali tersedia -> bagikan chat yang menunggu di antrian (termasuk antrian regional)
+    if (available) distributeUnassigned().catch(() => {});
     res.json(data);
   } catch (err) {
     console.error('PATCH /agents/:id/availability error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Set regional cabang agent (admin): 'barat' | 'timur' | null
+router.patch('/:id/region', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const region = REGIONS.includes(req.body.region) ? req.body.region : null;
+    const { data, error } = await supabase
+      .from('agents')
+      .update({ region })
+      .eq('id', id)
+      .select('id, region')
+      .single();
+    if (error) throw error;
+    // Agent baru masuk regional -> chat di antrian regional itu bisa langsung dibagikan
+    if (region) distributeUnassigned().catch(() => {});
+    res.json(data);
+  } catch (err) {
+    console.error('PATCH /agents/:id/region error:', err);
     res.status(500).json({ error: err.message });
   }
 });

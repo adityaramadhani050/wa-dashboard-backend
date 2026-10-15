@@ -1,25 +1,36 @@
 import { Router } from 'express';
 import { supabase } from '../db/supabase.js';
 import { getSock, broadcast, bumpConvOutgoing } from '../baileys/connection.js';
+import { requireAdmin } from '../middleware/auth.js';
+import { setRegionManually } from '../services/regionalBot.js';
 
 const router = Router();
+
+// Kolom lokasi kontak (city/province/region) ditambahkan oleh migrasi regional.
+// Fallback ke kolom dasar agar daftar chat tetap jalan sebelum migrasi dijalankan.
+const CONTACT_COLS = 'id, phone, name, first_seen, created_at, manual_wa_number, city, province, region';
+const CONTACT_COLS_BASE = 'id, phone, name, first_seen, created_at, manual_wa_number';
+const convSelect = (contactCols) => `
+  *,
+  contact:contacts (${contactCols}),
+  agents:assigned_to (id, name, email, role)
+`;
 
 router.get('/', async (req, res) => {
   try {
     const { agent_id } = req.query;
 
-    let query = supabase
-      .from('conversations')
-      .select(`
-        *,
-        contact:contacts (id, phone, name, first_seen, created_at, manual_wa_number),
-        agents:assigned_to (id, name, email, role)
-      `)
-      .order('updated_at', { ascending: false });
+    const build = (contactCols) => {
+      let q = supabase
+        .from('conversations')
+        .select(convSelect(contactCols))
+        .order('updated_at', { ascending: false });
+      if (agent_id) q = q.eq('assigned_to', agent_id);
+      return q;
+    };
 
-    if (agent_id) query = query.eq('assigned_to', agent_id);
-
-    const { data, error } = await query;
+    let { data, error } = await build(CONTACT_COLS);
+    if (error) ({ data, error } = await build(CONTACT_COLS_BASE));
     if (error) throw error;
 
     const conversationIds = data.map((conv) => conv.id);
@@ -67,16 +78,14 @@ router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
-    const { data: conv, error } = await supabase
+    const build = (contactCols) => supabase
       .from('conversations')
-      .select(`
-        *,
-        contact:contacts (id, phone, name, first_seen, created_at, manual_wa_number),
-        agents:assigned_to (id, name, email, role)
-      `)
+      .select(convSelect(contactCols))
       .eq('id', id)
       .maybeSingle();
 
+    let { data: conv, error } = await build(CONTACT_COLS);
+    if (error) ({ data: conv, error } = await build(CONTACT_COLS_BASE));
     if (error) throw error;
     if (!conv) return res.status(404).json({ error: 'Percakapan tidak ditemukan' });
 
@@ -229,6 +238,22 @@ router.patch('/:id/status', async (req, res) => {
     if (error) throw error;
     res.json(data);
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin menentukan/mengganti regional chat. Bila chat belum punya agent,
+// langsung diarahkan ke agent regional tsb (selama auto-assign aktif).
+router.patch('/:id/region', requireAdmin, async (req, res) => {
+  try {
+    const region = req.body?.region;
+    if (!['barat', 'timur'].includes(region))
+      return res.status(400).json({ error: "region harus 'barat' atau 'timur'" });
+    const result = await setRegionManually(req.params.id, region);
+    if (!result) return res.status(404).json({ error: 'Percakapan tidak ditemukan' });
+    res.json({ success: true, region: result.region, agent: result.agent || null });
+  } catch (err) {
+    console.error('PATCH /conversations/:id/region error:', err);
     res.status(500).json({ error: err.message });
   }
 });

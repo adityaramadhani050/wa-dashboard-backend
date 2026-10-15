@@ -3,6 +3,35 @@ import { supabase } from '../db/supabase.js';
 
 const router = Router();
 
+// Pesan per percakapan untuk menghitung waktu respons (urut waktu, per batch).
+// Kolom sent_by_bot (migrasi regional) opsional -> fallback bila belum ada.
+async function fetchMsgsByConv(convIds) {
+  const byConv = {};
+  for (let i = 0; i < convIds.length; i += 100) {
+    const batch = convIds.slice(i, i + 100);
+    const run = (cols) => supabase.from('messages').select(cols)
+      .in('conversation_id', batch).order('timestamp', { ascending: true });
+    let { data, error } = await run('conversation_id, from_me, timestamp, sent_by_bot');
+    if (error) ({ data } = await run('conversation_id, from_me, timestamp'));
+    (data || []).forEach((m) => { (byConv[m.conversation_id] = byConv[m.conversation_id] || []).push(m); });
+  }
+  return byConv;
+}
+
+// Waktu respons agent (menit) dalam satu percakapan, atau null bila belum dibalas.
+// Pesan bot bukan balasan agent. Waktu tanya-jawab dengan bot lokasi tidak
+// dibebankan ke agent: hitungan dimulai dari pesan bot terakhir sebelum balasan
+// agent pertama (≈ saat chat di-assign). Tanpa bot -> sejak pesan pertama customer.
+function agentResponseMinutes(msgs) {
+  const firstIn = msgs.find((m) => !m.from_me);
+  if (!firstIn) return null;
+  const firstOut = msgs.find((m) => m.from_me && !m.sent_by_bot && m.timestamp > firstIn.timestamp);
+  if (!firstOut) return null;
+  const botBefore = msgs.filter((m) => m.sent_by_bot && m.timestamp > firstIn.timestamp && m.timestamp < firstOut.timestamp);
+  const start = botBefore.length ? botBefore[botBefore.length - 1].timestamp : firstIn.timestamp;
+  return (new Date(firstOut.timestamp) - new Date(start)) / 60000;
+}
+
 // Daily message stats — supports ?from=YYYY-MM-DD&to=YYYY-MM-DD
 // Also upserts each day's stats into daily_stats table
 router.get('/daily', async (req, res) => {
@@ -177,19 +206,7 @@ router.get('/agents', async (req, res) => {
       .filter(c => c.assigned_to && agentById[c.assigned_to])
       .map(c => c.id);
 
-    let msgsByConv = {};
-    if (assignedConvIds.length > 0) {
-      const { data: msgs } = await supabase
-        .from('messages')
-        .select('conversation_id, from_me, timestamp')
-        .in('conversation_id', assignedConvIds)
-        .order('timestamp', { ascending: true });
-
-      for (const m of (msgs || [])) {
-        if (!msgsByConv[m.conversation_id]) msgsByConv[m.conversation_id] = [];
-        msgsByConv[m.conversation_id].push(m);
-      }
-    }
+    const msgsByConv = assignedConvIds.length > 0 ? await fetchMsgsByConv(assignedConvIds) : {};
 
     // Funnel per agent berbasis tag (Penawaran / Survey / Deal). Lead = total percakapan.
     const { data: tags } = await supabase.from('tags').select('id, name');
@@ -231,15 +248,8 @@ router.get('/agents', async (req, res) => {
       if (ctags.some((id) => stageTagIds.survey.has(id))) agent.survey++;
       if (ctags.some((id) => stageTagIds.deal.has(id))) agent.deal++;
 
-      const msgs = msgsByConv[conv.id] || [];
-      const firstIn = msgs.find(m => !m.from_me);
-      if (firstIn) {
-        const firstOut = msgs.find(m => m.from_me && m.timestamp > firstIn.timestamp);
-        if (firstOut) {
-          const diffMin = (new Date(firstOut.timestamp) - new Date(firstIn.timestamp)) / 60000;
-          agent._responseTimes.push(diffMin);
-        }
-      }
+      const diffMin = agentResponseMinutes(msgsByConv[conv.id] || []);
+      if (diffMin != null) agent._responseTimes.push(diffMin);
     }
 
     const result = Object.values(agentById)
@@ -282,31 +292,14 @@ router.get('/response-kpi', async (req, res) => {
     const assignedByConv = {};
     (convs || []).forEach((c) => { assignedByConv[c.id] = c.assigned_to || null; });
 
-    const msgsByConv = {};
-    if (convIds.length) {
-      // Supabase .in() per batch agar URL tidak kepanjangan
-      for (let i = 0; i < convIds.length; i += 100) {
-        const batch = convIds.slice(i, i + 100);
-        const { data: msgs } = await supabase
-          .from('messages')
-          .select('conversation_id, from_me, timestamp')
-          .in('conversation_id', batch)
-          .order('timestamp', { ascending: true });
-        (msgs || []).forEach((m) => {
-          (msgsByConv[m.conversation_id] = msgsByConv[m.conversation_id] || []).push(m);
-        });
-      }
-    }
+    // Supabase .in() per batch agar URL tidak kepanjangan (di dalam helper)
+    const msgsByConv = convIds.length ? await fetchMsgsByConv(convIds) : {};
 
     let total = 0, met = 0;
     const perAgent = {}; // key agentId|'unassigned'
     for (const cid of convIds) {
-      const msgs = msgsByConv[cid] || [];
-      const firstIn = msgs.find((m) => !m.from_me);
-      if (!firstIn) continue;
-      const firstOut = msgs.find((m) => m.from_me && m.timestamp > firstIn.timestamp);
-      if (!firstOut) continue;
-      const diffMin = (new Date(firstOut.timestamp) - new Date(firstIn.timestamp)) / 60000;
+      const diffMin = agentResponseMinutes(msgsByConv[cid] || []);
+      if (diffMin == null) continue;
       total++;
       const ok = diffMin <= KPI_MINUTES;
       if (ok) met++;
