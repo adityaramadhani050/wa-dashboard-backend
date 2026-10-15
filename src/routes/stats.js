@@ -3,16 +3,45 @@ import { supabase } from '../db/supabase.js';
 
 const router = Router();
 
+// Ambil semua baris secara bertahap. Supabase membatasi 1000 baris per query,
+// jadi tanpa ini statistik rentang panjang (mis. 30 hari) terpotong diam-diam.
+// `build` harus mengembalikan query BARU yang sudah berurutan (order) tiap dipanggil.
+async function fetchAll(build) {
+  const all = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await build().range(from, from + 999);
+    if (error) return { data: null, error };
+    all.push(...(data || []));
+    if (!data || data.length < 1000) break;
+  }
+  return { data: all, error: null };
+}
+
+const REGIONS = ['barat', 'timur'];
+
+// Himpunan id percakapan milik regional tertentu (regional chat, atau regional
+// kontaknya). null = tanpa filter regional.
+async function regionConvSet(region) {
+  if (!REGIONS.includes(region)) return null;
+  const { data, error } = await fetchAll(() => supabase
+    .from('conversations').select('id, region, contact:contacts (region)').order('id', { ascending: true }));
+  if (error) return new Set(); // kolom regional belum dimigrasi
+  return new Set(data.filter((c) => (c.region || c.contact?.region) === region).map((c) => c.id));
+}
+
 // Pesan per percakapan untuk menghitung waktu respons (urut waktu, per batch).
 // Kolom sent_by_bot (migrasi regional) opsional -> fallback bila belum ada.
 async function fetchMsgsByConv(convIds) {
   const byConv = {};
   for (let i = 0; i < convIds.length; i += 100) {
     const batch = convIds.slice(i, i + 100);
-    const run = (cols) => supabase.from('messages').select(cols)
-      .in('conversation_id', batch).order('timestamp', { ascending: true });
-    let { data, error } = await run('conversation_id, from_me, timestamp, sent_by_bot');
-    if (error) ({ data } = await run('conversation_id, from_me, timestamp'));
+    // 100 percakapan bisa > 1000 pesan -> ambil bertahap agar KPI tidak terpotong
+    const run = (cols) => fetchAll(() => supabase.from('messages').select(cols)
+      .in('conversation_id', batch)
+      .order('timestamp', { ascending: true })
+      .order('id', { ascending: true }));
+    let { data, error } = await run('id, conversation_id, from_me, timestamp, sent_by_bot');
+    if (error) ({ data } = await run('id, conversation_id, from_me, timestamp'));
     (data || []).forEach((m) => { (byConv[m.conversation_id] = byConv[m.conversation_id] || []).push(m); });
   }
   return byConv;
@@ -54,13 +83,17 @@ router.get('/daily', async (req, res) => {
     const qFromIso = new Date(fromStr + 'T00:00:00+07:00').toISOString();
     const qToIso = new Date(toStr + 'T23:59:59+07:00').toISOString();
 
-    const { data: messages, error } = await supabase
+    const regionSet = await regionConvSet(req.query.region);
+
+    let { data: messages, error } = await fetchAll(() => supabase
       .from('messages')
-      .select('timestamp, from_me')
+      .select('id, timestamp, from_me, conversation_id')
       .gte('timestamp', qFromIso)
-      .lte('timestamp', qToIso);
+      .lte('timestamp', qToIso)
+      .order('id', { ascending: true }));
 
     if (error) throw error;
+    if (regionSet) messages = messages.filter((m) => regionSet.has(m.conversation_id));
 
     // Bangun daftar hari (WIB) inklusif dari fromStr..toStr
     const byDate = {};
@@ -83,18 +116,22 @@ router.get('/daily', async (req, res) => {
     const result = Object.values(byDate);
 
     // Kontak baru & resolved per hari (WIB)
-    const { data: contacts } = await supabase
+    let { data: contacts } = await fetchAll(() => supabase
       .from('contacts')
-      .select('created_at')
+      .select(regionSet ? 'id, created_at, region' : 'id, created_at')
       .gte('created_at', qFromIso)
-      .lte('created_at', qToIso);
+      .lte('created_at', qToIso)
+      .order('id', { ascending: true }));
+    if (regionSet) contacts = (contacts || []).filter((c) => c.region === req.query.region);
 
-    const { data: resolved } = await supabase
+    let { data: resolved } = await fetchAll(() => supabase
       .from('conversations')
-      .select('updated_at')
+      .select('id, updated_at')
       .eq('status', 'resolved')
       .gte('updated_at', qFromIso)
-      .lte('updated_at', qToIso);
+      .lte('updated_at', qToIso)
+      .order('id', { ascending: true }));
+    if (regionSet) resolved = (resolved || []).filter((c) => regionSet.has(c.id));
 
     const contactsByDate = {};
     for (const c of (contacts || [])) {
@@ -115,10 +152,13 @@ router.get('/daily', async (req, res) => {
       resolved_chats: resolvedByDate[d.date] || 0,
     }));
 
-    // Fire and forget — don't block the response
-    supabase.from('daily_stats')
-      .upsert(upsertRows, { onConflict: 'date' })
-      .then(({ error: e }) => { if (e) console.warn('daily_stats upsert warn:', e.message); });
+    // Fire and forget — don't block the response. Hanya untuk data global
+    // (tanpa filter regional) agar tabel daily_stats tidak tertimpa angka sebagian.
+    if (!regionSet) {
+      supabase.from('daily_stats')
+        .upsert(upsertRows, { onConflict: 'date' })
+        .then(({ error: e }) => { if (e) console.warn('daily_stats upsert warn:', e.message); });
+    }
 
     // Attach extra fields to result
     const enriched = result.map(d => ({
@@ -139,12 +179,15 @@ router.get('/contacts', async (req, res) => {
   try {
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
+    const region = REGIONS.includes(req.query.region) ? req.query.region : null;
+    const base = () => {
+      const q = supabase.from('contacts').select('*', { count: 'exact', head: true });
+      return region ? q.eq('region', region) : q;
+    };
 
     const [{ count: total, error: e1 }, { count: newToday, error: e2 }] = await Promise.all([
-      supabase.from('contacts').select('*', { count: 'exact', head: true }),
-      supabase.from('contacts')
-        .select('*', { count: 'exact', head: true })
-        .gte('created_at', todayStart.toISOString()),
+      base(),
+      base().gte('created_at', todayStart.toISOString()),
     ]);
 
     if (e1) throw e1;
@@ -152,6 +195,8 @@ router.get('/contacts', async (req, res) => {
 
     res.json({ total: total || 0, newToday: newToday || 0 });
   } catch (err) {
+    // Filter regional tapi kolom belum dimigrasi -> jangan tampilkan angka global
+    if (REGIONS.includes(req.query.region)) return res.json({ total: 0, newToday: 0 });
     // Fallback to conversations table
     try {
       const todayStart = new Date();
@@ -173,27 +218,30 @@ router.get('/contacts', async (req, res) => {
 // (memfilter percakapan berdasarkan updated_at, konsisten dgn funnel & response-kpi)
 router.get('/agents', async (req, res) => {
   try {
-    let convQuery = supabase.from('conversations').select('id, assigned_to, status');
-    if (req.query.from || req.query.to) {
-      const toDate = req.query.to ? new Date(req.query.to) : new Date();
-      const fromDate = req.query.from ? new Date(req.query.from) : new Date(toDate.getTime() - 29 * 86400000);
-      fromDate.setHours(0, 0, 0, 0);
-      toDate.setHours(23, 59, 59, 999);
-      convQuery = convQuery
-        .gte('updated_at', fromDate.toISOString())
-        .lte('updated_at', toDate.toISOString());
-    }
+    const region = REGIONS.includes(req.query.region) ? req.query.region : null;
+    const buildConv = () => {
+      let q = supabase.from('conversations').select('id, assigned_to, status').order('id', { ascending: true });
+      if (req.query.from || req.query.to) {
+        const toDate = req.query.to ? new Date(req.query.to) : new Date();
+        const fromDate = req.query.from ? new Date(req.query.from) : new Date(toDate.getTime() - 29 * 86400000);
+        fromDate.setHours(0, 0, 0, 0);
+        toDate.setHours(23, 59, 59, 999);
+        q = q.gte('updated_at', fromDate.toISOString()).lte('updated_at', toDate.toISOString());
+      }
+      return q;
+    };
 
-    const [{ data: agentsList, error: ae }, { data: convs, error: ce }] = await Promise.all([
-      supabase.from('agents').select('id, name, email, role'),
-      convQuery,
-    ]);
+    let agentsRes = await supabase.from('agents').select('id, name, email, role, region');
+    if (agentsRes.error) agentsRes = await supabase.from('agents').select('id, name, email, role');
+    const { data: agentsList, error: ae } = agentsRes;
+    const { data: convs, error: ce } = await fetchAll(buildConv);
     if (ae) throw ae;
     if (ce) throw ce;
 
     const agentById = {};
     for (const a of (agentsList || [])) {
       if (a.role === 'admin') continue; // tampilkan hanya agent, bukan admin
+      if (region && a.region !== region) continue; // filter regional: hanya agent regional tsb
       agentById[a.id] = {
         id: a.id, name: a.name, email: a.email,
         total: 0, open: 0, in_progress: 0, resolved: 0,
@@ -277,13 +325,17 @@ router.get('/response-kpi', async (req, res) => {
     fromDate.setHours(0, 0, 0, 0);
     toDate.setHours(23, 59, 59, 999);
 
-    const [{ data: agentsList }, { data: convs }] = await Promise.all([
+    const [{ data: agentsList }, convRes, regionSet] = await Promise.all([
       supabase.from('agents').select('id, name'),
-      supabase.from('conversations')
+      fetchAll(() => supabase.from('conversations')
         .select('id, assigned_to, updated_at')
         .gte('updated_at', fromDate.toISOString())
-        .lte('updated_at', toDate.toISOString()),
+        .lte('updated_at', toDate.toISOString())
+        .order('id', { ascending: true })),
+      regionConvSet(req.query.region),
     ]);
+    let convs = convRes.data || [];
+    if (regionSet) convs = convs.filter((c) => regionSet.has(c.id));
 
     const agentName = {};
     (agentsList || []).forEach((a) => { agentName[a.id] = a.name; });
@@ -337,12 +389,16 @@ router.get('/funnel', async (req, res) => {
     fromDate.setHours(0, 0, 0, 0);
     toDate.setHours(23, 59, 59, 999);
 
-    const { data: convs } = await supabase
-      .from('conversations')
-      .select('id')
-      .gte('updated_at', fromDate.toISOString())
-      .lte('updated_at', toDate.toISOString());
-    const convIds = new Set((convs || []).map((c) => c.id));
+    const [{ data: convs }, regionSet] = await Promise.all([
+      fetchAll(() => supabase
+        .from('conversations')
+        .select('id')
+        .gte('updated_at', fromDate.toISOString())
+        .lte('updated_at', toDate.toISOString())
+        .order('id', { ascending: true })),
+      regionConvSet(req.query.region),
+    ]);
+    const convIds = new Set((convs || []).map((c) => c.id).filter((id) => !regionSet || regionSet.has(id)));
     const totalLeads = convIds.size;
 
     const { data: tags } = await supabase.from('tags').select('id, name');
@@ -361,10 +417,12 @@ router.get('/funnel', async (req, res) => {
     const allStageTagIds = [...new Set(stageTagIds.flatMap((s) => s.ids))];
     let ctRows = [];
     if (allStageTagIds.length) {
-      const { data } = await supabase
+      const { data } = await fetchAll(() => supabase
         .from('conversation_tags')
         .select('conversation_id, tag_id')
-        .in('tag_id', allStageTagIds);
+        .in('tag_id', allStageTagIds)
+        .order('conversation_id', { ascending: true })
+        .order('tag_id', { ascending: true }));
       ctRows = data || [];
     }
 

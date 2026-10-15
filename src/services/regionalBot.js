@@ -23,9 +23,14 @@ export const DEFAULT_REGIONAL_SETTINGS = {
   internal_numbers: [],
   msg_ask: 'Halo Kak {{nama}} 👋 Terima kasih telah menghubungi kami. Boleh kami tahu Kakak berlokasi di kota/kabupaten mana? (contoh: Surabaya, Bekasi, Denpasar)',
   msg_retry: 'Mohon maaf Kak, lokasinya belum kami kenali 🙏 Bisa ketik nama kota atau kabupatennya saja? (contoh: Malang, Bandung, Makassar)',
-  msg_confirm: 'Terima kasih Kak! Kakak akan dibantu tim Regional {{regional}} kami, mohon tunggu sebentar ya 🙏',
+  msg_confirm: 'Terima kasih Kak! Kakak akan dibantu oleh {{agent}} dari tim Regional {{regional}} kami, mohon tunggu sebentar ya 🙏',
+  // Dipakai bila regional terdeteksi tapi belum ada agent tersedia (antrian regional)
+  msg_confirm_queue: 'Terima kasih Kak! Kakak akan dibantu tim Regional {{regional}} kami, mohon tunggu sebentar ya 🙏',
   msg_fail: 'Terima kasih Kak, tim kami akan segera menghubungi Kakak 🙏',
 };
+// Teks konfirmasi bawaan versi lama (tanpa nama agent). Bila admin belum
+// mengubahnya, otomatis diganti versi baru yang menyebut nama agent.
+const LEGACY_CONFIRM = 'Terima kasih Kak! Kakak akan dibantu tim Regional {{regional}} kami, mohon tunggu sebentar ya 🙏';
 
 export function normalizePhone(p) {
   let d = String(p || '').replace(/\D/g, '');
@@ -46,7 +51,8 @@ export function parseRegionalSettings(raw) {
     internal_numbers: [...new Set(nums.map(normalizePhone).filter((n) => n.length >= 8))],
     msg_ask: text(v.msg_ask, D.msg_ask),
     msg_retry: text(v.msg_retry, D.msg_retry),
-    msg_confirm: text(v.msg_confirm, D.msg_confirm),
+    msg_confirm: v.msg_confirm === LEGACY_CONFIRM ? D.msg_confirm : text(v.msg_confirm, D.msg_confirm),
+    msg_confirm_queue: text(v.msg_confirm_queue, D.msg_confirm_queue),
     msg_fail: text(v.msg_fail, D.msg_fail),
   };
 }
@@ -65,9 +71,10 @@ export async function getRegionalSettings() {
 export function invalidateRegionalSettingsCache() { settingsCache.at = 0; }
 
 // ── Utilitas ────────────────────────────────────────────────────────────────
-function fill(tpl, { nama, regional } = {}) {
+function fill(tpl, { nama, regional, agent } = {}) {
   let s = String(tpl || '');
   s = s.replace(/\{\{\s*regional\s*\}\}/gi, regional || '');
+  s = s.replace(/\{\{\s*agent\s*\}\}/gi, agent ? String(agent).trim() : 'tim kami');
   const n = nama && !/^\+?\d[\d\s-]*$/.test(nama) ? String(nama).trim() : '';
   s = s.replace(/\s*\{\{\s*nama\s*\}\}/gi, n ? ` ${n}` : '');
   return s.replace(/[ \t]{2,}/g, ' ').trim();
@@ -148,14 +155,16 @@ async function backfillRegionFromAgent(contactId, conversationId, agentId) {
   return agent.region;
 }
 
-// Assign ke agent regional + (opsional) konfirmasi bot. KPI agent mulai dari sini.
+// Assign ke agent regional, lalu (opsional) konfirmasi bot yang menyebut nama
+// agent yang ditugaskan. KPI agent mulai dari sini.
 async function assignRegional(ctx, region, settings, { confirm }) {
   const { conversationId, jid } = ctx;
+  const agent = await routeConversation(conversationId, { region });
   if (confirm) {
-    await sendBot(conversationId, jid, fill(settings.msg_confirm, { nama: ctx.contactName, regional: REGION_LABEL[region] }))
+    const tpl = agent ? settings.msg_confirm : settings.msg_confirm_queue;
+    await sendBot(conversationId, jid, fill(tpl, { nama: ctx.contactName, regional: REGION_LABEL[region], agent: agent?.name }))
       .catch((e) => console.warn('[RegionalBot] kirim konfirmasi gagal:', e.message));
   }
-  const agent = await routeConversation(conversationId, { region });
   const nowIso = new Date().toISOString();
   await setConv(conversationId, { awaiting_since: nowIso, last_from_me: false });
   await announceAssignment(conversationId, agent);

@@ -102,12 +102,15 @@ router.get('/candidates', requireAdmin, async (req, res) => {
   try {
     const cooldownDays = Math.max(1, parseInt(req.query.cooldown_days, 10) || 14);
 
-    const { data: convs, error } = await supabase
+    // Kolom regional (migrasi regional) opsional -> fallback bila belum ada
+    const build = (cols) => supabase
       .from('conversations')
-      .select('id, wa_jid, status, updated_at, last_message_at, contact:contacts (id, phone, name, manual_wa_number)')
+      .select(cols)
       .eq('status', 'resolved')
       .order('last_message_at', { ascending: false, nullsFirst: false })
       .limit(1000);
+    let { data: convs, error } = await build('id, wa_jid, status, updated_at, last_message_at, region, contact:contacts (id, phone, name, manual_wa_number, region, city)');
+    if (error) ({ data: convs, error } = await build('id, wa_jid, status, updated_at, last_message_at, contact:contacts (id, phone, name, manual_wa_number)'));
     if (error) throw error;
 
     const ids = (convs || []).map((c) => c.id);
@@ -155,6 +158,8 @@ router.get('/candidates', requireAdmin, async (req, res) => {
         phone,
         wa_jid: waJid,
         last_message_at: c.last_message_at || c.updated_at || null,
+        region: c.contact?.region || c.region || null,
+        city: c.contact?.city || null,
         on_cooldown: onCooldown,
         cooldown_until: onCooldown ? until : null,
       });

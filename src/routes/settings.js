@@ -147,4 +147,74 @@ router.put('/regional-routing', requireAdmin, async (req, res) => {
   }
 });
 
+// Ambil semua baris tabel secara bertahap (Supabase membatasi 1000 baris/query)
+async function fetchAllRows(table, cols) {
+  const all = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await supabase.from(table).select(cols).order('id', { ascending: true }).range(from, from + 999);
+    if (error) throw error;
+    all.push(...(data || []));
+    if (!data || data.length < 1000) break;
+  }
+  return all;
+}
+
+// Backfill sekali jalan: isi regional kontak lama & percakapannya.
+//  - kontak sudah punya regional -> salin ke percakapan yang belum punya
+//  - kontak belum punya regional -> ambil dari regional agent yang menanganinya
+// Hanya mengisi yang masih kosong (tidak menimpa pilihan admin).
+router.post('/regional-backfill', requireAdmin, async (req, res) => {
+  try {
+    const [agents, contacts, convs] = await Promise.all([
+      fetchAllRows('agents', 'id, region'),
+      fetchAllRows('contacts', 'id, region'),
+      fetchAllRows('conversations', 'id, contact_id, assigned_to, region'),
+    ]);
+    const agentRegion = {};
+    agents.forEach((a) => { if (a.region) agentRegion[a.id] = a.region; });
+    const contactRegion = {};
+    contacts.forEach((c) => { if (c.region) contactRegion[c.id] = c.region; });
+
+    const setContacts = { barat: new Set(), timur: new Set() };
+    const setConvs = { barat: new Set(), timur: new Set() };
+    let noSource = 0;
+    for (const cv of convs) {
+      // Prioritas: regional kontak -> regional chat (mis. diset admin) -> regional agent
+      const region = contactRegion[cv.contact_id] || cv.region || agentRegion[cv.assigned_to] || null;
+      if (!region) { if (!cv.region) noSource++; continue; }
+      if (!contactRegion[cv.contact_id] && cv.contact_id) {
+        setContacts[region].add(cv.contact_id);
+        contactRegion[cv.contact_id] = region; // kontak dgn >1 percakapan: pakai yang pertama
+      }
+      if (!cv.region) setConvs[region].add(cv.id);
+    }
+
+    const applyBatched = async (table, region, ids) => {
+      const list = [...ids];
+      let n = 0;
+      for (let i = 0; i < list.length; i += 150) {
+        const { data, error } = await supabase.from(table).update({ region })
+          .in('id', list.slice(i, i + 150)).is('region', null).select('id');
+        if (error) throw error;
+        n += (data || []).length;
+      }
+      return n;
+    };
+    let contactsUpdated = 0, convsUpdated = 0;
+    for (const region of ['barat', 'timur']) {
+      contactsUpdated += await applyBatched('contacts', region, setContacts[region]);
+      convsUpdated += await applyBatched('conversations', region, setConvs[region]);
+    }
+    res.json({
+      success: true,
+      contacts_updated: contactsUpdated,
+      conversations_updated: convsUpdated,
+      without_source: noSource, // belum pernah ditangani agent ber-regional
+    });
+  } catch (err) {
+    console.error('POST /settings/regional-backfill error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;
