@@ -47,7 +47,12 @@ export function parseRegionalSettings(raw) {
   const nums = Array.isArray(v.internal_numbers) ? v.internal_numbers : String(v.internal_numbers || '').split(/[\s,;]+/);
   return {
     enabled: !!v.enabled,
-    timeout_minutes: Math.min(1440, Math.max(5, parseInt(v.timeout_minutes, 10) || D.timeout_minutes)),
+    // 0 = timeout dinonaktifkan; kosong/tidak valid = bawaan; selain itu 5..1440 menit
+    timeout_minutes: (() => {
+      const t = parseInt(v.timeout_minutes, 10);
+      if (Number.isNaN(t)) return D.timeout_minutes;
+      return t <= 0 ? 0 : Math.min(1440, Math.max(5, t));
+    })(),
     internal_numbers: [...new Set(nums.map(normalizePhone).filter((n) => n.length >= 8))],
     msg_ask: text(v.msg_ask, D.msg_ask),
     msg_retry: text(v.msg_retry, D.msg_retry),
@@ -174,14 +179,16 @@ async function assignRegional(ctx, region, settings, { confirm }) {
 
 // Gagal menentukan regional -> antrian admin. Klaim status dulu agar tidak
 // diproses dua kali (mis. timeout bersamaan dengan pesan masuk).
-async function markUnresolved({ conversationId, jid, contactName, phone, payload }, settings) {
+// silent: tanpa pesan ke customer (dipakai saat timeout — customer tidak sedang
+// membalas, jadi tidak perlu dikirimi pesan penutup).
+async function markUnresolved({ conversationId, jid, contactName, phone, payload }, settings, { silent = false } = {}) {
   const { data: claimed } = await supabase.from('conversations')
     .update({ bot_state: 'unresolved' })
     .eq('id', conversationId).eq('bot_state', 'awaiting_location')
     .select('id').maybeSingle();
   if (!claimed) return;
 
-  if (jid) {
+  if (jid && !silent) {
     await sendBot(conversationId, jid, fill(settings.msg_fail, { nama: contactName }))
       .catch((e) => console.warn('[RegionalBot] kirim pesan gagal-deteksi gagal:', e.message));
   }
@@ -192,7 +199,17 @@ async function markUnresolved({ conversationId, jid, contactName, phone, payload
     conversationId, contactName, phone,
     message: { body: 'Regional belum diketahui — perlu ditentukan admin' },
   }).catch(() => {});
-  console.log(`[RegionalBot] conv=${conversationId} regional tidak terdeteksi -> antrian admin`);
+  console.log(`[RegionalBot] conv=${conversationId} ${silent ? 'timeout (tanpa pesan)' : 'regional tidak terdeteksi'} -> antrian admin`);
+}
+
+// Apakah admin/agent (bukan bot) sudah membalas sejak bot bertanya?
+async function humanRepliedSince(conversationId, sinceIso) {
+  let q = supabase.from('messages').select('id, sent_by_bot')
+    .eq('conversation_id', conversationId).eq('from_me', true);
+  if (sinceIso) q = q.gt('timestamp', sinceIso);
+  const { data, error } = await q.limit(20);
+  if (error) return true; // ragu -> anggap sudah ditangani manusia (jangan menyela)
+  return (data || []).some((m) => !m.sent_by_bot);
 }
 
 async function startBot(ctx, settings) {
@@ -283,8 +300,18 @@ export async function routeIncoming(ctx) {
     return handleLocationAnswer(ctx, conv, settings);
   }
 
-  // 2) Antrian admin: regional belum diketahui, menunggu keputusan admin
+  // 2) Antrian admin: regional belum diketahui, menunggu keputusan admin.
+  // Bila customer belakangan menyebut kotanya (mis. menjawab pertanyaan bot
+  // setelah timeout) dan belum ada balasan manusia, langsung arahkan ke
+  // agent regionalnya. Hanya kamus kota (tanpa AI) agar hemat kuota.
   if (conv.bot_state === 'unresolved' && !conv.assigned_to) {
+    const late = matchLocation(ctx.body);
+    if (late && !(await humanRepliedSince(ctx.conversationId, conv.bot_asked_at))) {
+      await applyRegion(ctx.contactId, ctx.conversationId, late);
+      await setConv(ctx.conversationId, { bot_state: 'done' });
+      console.log(`[RegionalBot] conv=${ctx.conversationId} jawaban lokasi terlambat="${late.matched}" -> ${late.region}`);
+      return assignRegional(ctx, late.region, settings, { confirm: true });
+    }
     pushNewMessage(ctx.payload).catch(() => {});
     return;
   }
@@ -339,7 +366,7 @@ export async function setRegionManually(conversationId, region) {
 // ── Job: jawaban lokasi tidak datang dalam batas waktu -> antrian admin ────
 async function checkBotTimeouts() {
   const settings = await getRegionalSettings();
-  if (!settings.enabled) return;
+  if (!settings.enabled || !settings.timeout_minutes) return; // 0 = timeout dinonaktifkan
   const cutoff = new Date(Date.now() - settings.timeout_minutes * 60000).toISOString();
   const { data, error } = await supabase.from('conversations')
     .select('id, wa_jid, assigned_to, contact:contacts (name, phone)')
@@ -351,7 +378,8 @@ async function checkBotTimeouts() {
     if (c.assigned_to) { await setConv(c.id, { bot_state: 'done' }); continue; }
     const phone = c.contact?.phone;
     const jid = c.wa_jid || (phone ? `${String(phone).split('@')[0]}@s.whatsapp.net` : null);
-    await markUnresolved({ conversationId: c.id, jid, contactName: c.contact?.name, phone }, settings);
+    // Timeout: customer tidak sedang membalas -> masuk antrian admin TANPA pesan ke customer
+    await markUnresolved({ conversationId: c.id, jid, contactName: c.contact?.name, phone }, settings, { silent: true });
   }
 }
 
