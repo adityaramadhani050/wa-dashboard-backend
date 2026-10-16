@@ -3,6 +3,7 @@ import { supabase } from '../db/supabase.js';
 import { getSock, broadcast, bumpConvOutgoing } from '../baileys/connection.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { setRegionManually } from '../services/regionalBot.js';
+import { onTagsChanged as onFollowupTagsChanged } from '../services/followup.js';
 
 const router = Router();
 
@@ -364,6 +365,9 @@ router.post('/:id/tags', async (req, res) => {
         .eq('id', id);
     }
 
+    // Follow-up: tag pemicu/penghenti mungkin berubah
+    onFollowupTagsChanged(id).catch(() => {});
+
     res.status(201).json(data);
   } catch (err) {
     console.error(`POST /conversations/${req.params.id}/tags error:`, err);
@@ -381,6 +385,7 @@ router.delete('/:id/tags/:tagId', async (req, res) => {
       .eq('tag_id', tagId);
 
     if (error) throw error;
+    onFollowupTagsChanged(id).catch(() => {});
     res.json({ success: true });
   } catch (err) {
     console.error(`DELETE /conversations/${req.params.id}/tags/${req.params.tagId} error:`, err);

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { GoogleGenAI } from '@google/genai';
 import { supabase } from '../db/supabase.js';
+import { STEP_META, OBJECTIONS } from '../services/followup.js';
 
 const router = Router();
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
@@ -266,6 +267,54 @@ async function getHistoryText(conversationId, limit = 30) {
     .map((m) => `${m.from_me ? 'Sales' : 'Customer'}: ${m.body}`)
     .join('\n');
 }
+
+// Draf pesan follow-up sesuai tahap (CONFIRM/FEEDBACK/OBJECTION/VALUES/REACTIVATION/NURTURE).
+// body: { conversation_id, step }
+router.post('/followup-draft', async (req, res) => {
+  try {
+    const { conversation_id, step } = req.body;
+    if (!conversation_id || !step) return res.status(400).json({ error: 'conversation_id dan step wajib diisi' });
+    if (!process.env.GEMINI_API_KEY) return res.status(500).json({ error: 'GEMINI_API_KEY belum diset di server' });
+    const meta = STEP_META[step];
+    if (!meta) return res.status(400).json({ error: 'Tahap follow-up tidak dikenal' });
+
+    const [history, { data: contactRow }, { data: lastObj }] = await Promise.all([
+      getHistoryText(conversation_id, 40),
+      supabase.from('conversations').select('contact:contacts (name)').eq('id', conversation_id).maybeSingle(),
+      supabase.from('followup_tasks').select('objection_category, note')
+        .eq('conversation_id', conversation_id).not('objection_category', 'is', null)
+        .order('done_at', { ascending: false }).limit(1),
+    ]);
+    const name = contactRow?.contact?.name && !/^\+?\d+$/.test(contactRow.contact.name) ? contactRow.contact.name : '';
+    const objection = lastObj?.[0];
+    const objectionText = objection
+      ? `Keberatan customer yang tercatat: ${OBJECTIONS[objection.objection_category] || objection.objection_category}${objection.note ? ` (catatan agent: ${objection.note})` : ''}.`
+      : 'Belum ada keberatan yang tercatat.';
+
+    const result = await ai.models.generateContent({
+      model: MODEL,
+      contents:
+        `Tahap follow-up: ${meta.label} — tujuan: ${meta.goal}\n${objectionText}\n` +
+        `Nama customer: ${name || '(tidak diketahui)'}\n\nRiwayat chat:\n${history || '(kosong)'}\n\n` +
+        'Tulis SATU pesan WhatsApp follow-up untuk dikirim sales ke customer ini.',
+      config: {
+        systemInstruction:
+          'Kamu sales PLTS (panel surya) yang ramah dan profesional. Tulis pesan follow-up WhatsApp berbahasa Indonesia yang ' +
+          'singkat (2-4 kalimat), personal, merujuk penawaran/diskusi terakhir di riwayat chat, sesuai tujuan tahap. ' +
+          'Sapa dengan "Kak" (+ nama bila ada). Jangan mengarang harga/spesifikasi yang tidak ada di riwayat. ' +
+          'Untuk tahap VALUES, tawarkan informasi tambahan yang relevan dengan keberatan customer. ' +
+          'Jangan memaksa. Jawab HANYA isi pesannya.',
+        maxOutputTokens: 400,
+        temperature: 0.7,
+        thinkingConfig: { thinkingBudget: 0 },
+      },
+    });
+
+    res.json({ draft: (result.text || '').trim() });
+  } catch (err) {
+    handleAiError(err, res, 'POST /ai/followup-draft');
+  }
+});
 
 function handleAiError(err, res, label) {
   console.error(`${label} error:`, err);

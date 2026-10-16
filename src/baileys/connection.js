@@ -14,6 +14,7 @@ import { publish, redisAvailable } from '../db/redis.js'
 import { sendToAgents, sendToAll, isPushEnabled } from '../push/fcm.js'
 import { sendWebPushToAgents, sendWebPushToAll, isWebPushEnabled } from '../push/webpush.js'
 import { routeIncoming, isBotMessageId } from '../services/regionalBot.js'
+import { pauseOnCustomerReply } from '../services/followup.js'
 import { compressImage, makeThumbnail } from '../utils/media.js'
 import QRCode from 'qrcode'
 import fs from 'fs/promises'
@@ -691,6 +692,8 @@ async function persistMessage(msg, { isLive }) {
   if (isLive) {
     incrementDailyStats().catch(() => {})
     if (!fromMe) {
+      // Customer membalas -> jeda urutan follow-up (lanjut saat chat Resolved lagi)
+      pauseOnCustomerReply(conversationId).catch(() => {})
       // Chat bertag Deal / Non-Client dianggap SELESAI -> tidak boleh Aktif.
       // Paksa Resolved & lewati reaktivasi + auto-assign. Non-Client tanpa notif;
       // Deal tetap diberi notif agar agent tahu ada balasan (mis. koordinasi kirim).
