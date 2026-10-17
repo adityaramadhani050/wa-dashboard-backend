@@ -170,12 +170,16 @@ router.post('/:id/assign', async (req, res) => {
 
     // Di-assign ke agent -> chat jadi "Aktif" (kecuali sudah resolved tetap dihormati?
     // tetap set in_progress karena agent kini menangani).
-    const { data, error } = await supabase
+    const now = new Date().toISOString();
+    const run = (patch) => supabase
       .from('conversations')
-      .update({ assigned_to: agent_id, status: 'in_progress', updated_at: new Date().toISOString() })
+      .update(patch)
       .eq('id', id)
       .select(`*, contact:contacts (id, phone, name), agents:assigned_to (id, name, email, role)`)
       .single();
+    const base = { assigned_to: agent_id, status: 'in_progress', updated_at: now };
+    let { data, error } = await run({ ...base, assigned_at: now });
+    if (error && /assigned_at/.test(error.message || '')) ({ data, error } = await run(base)); // kolom belum ada
 
     if (error) throw error;
 
