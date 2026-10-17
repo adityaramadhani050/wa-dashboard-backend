@@ -194,8 +194,7 @@ TAG PERCAKAPAN INI: ${convTagsText}
 Tag di atas adalah penanda status dari tim sales — kalau ada, PATUHI dan sesuaikan saranmu (tag ini bisa MENGUBAH tahap di atas). Arti tag yang umum dipakai:
 - "Deal": customer SUDAH closing/beli. Jangan jualan lagi — fokus after-sales, ucapan terima kasih, atau bantu hal teknis/jadwal pemasangan.
 - "Fail": lead sudah TIDAK dilanjutkan. JANGAN memaksa jualan atau menawarkan survei. Cukup balasan sopan & ringan; boleh tanya halus kalau masih ada yang bisa dibantu, tanpa mendesak.
-- "Survey": survei lokasi SUDAH ditawarkan/dijadwalkan. JANGAN menawarkan survei lagi — lanjutkan dengan konfirmasi jadwal atau tindak lanjut hasil survei.
-- "Penawaran": penawaran/harga SUDAH dikirim. Tindak lanjuti keputusan customer, jawab keberatan, bantu mereka memutuskan.
+- "Prospek": penawaran/harga SUDAH dikirim (atau survei sudah dijadwalkan). Tindak lanjuti keputusan customer, jawab keberatan, bantu mereka memutuskan.
 - "Follow-Up": customer perlu di-follow up. Beri dorongan halus & relevan sesuai konteks terakhir.
 Kalau ada tag lain yang tak tercantum di sini, pakai penilaianmu sendiri.
 

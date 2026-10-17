@@ -1,4 +1,4 @@
-// Follow-up otomatis untuk chat bertag Penawaran / Follow-Up.
+// Follow-up otomatis untuk chat bertag Prospek (dulu Penawaran) / Follow-Up.
 //
 // Urutan dimulai saat chat RESOLVED:
 //   H+1 CONFIRM → H+3 FEEDBACK → H+7 OBJECTION → H+14 VALUES → H+30 REACTIVATION
@@ -38,7 +38,7 @@ export const OUTCOMES = {
   considering: 'Dibalas, masih pertimbangan',
   objection: 'Keberatan',
   later: 'Minta dihubungi nanti',
-  interested: 'Tertarik lanjut (Survey/Deal)',
+  interested: 'Tertarik lanjut / Deal',
   lost: 'Tidak jadi / Lost',
 };
 export const OBJECTIONS = {
@@ -80,7 +80,7 @@ export async function getFollowupConfig() {
   return parseFollowupSettings(data?.value);
 }
 
-const TRIGGER_RE = /penawaran|quotation|\bquote\b|follow[\s_-]*up/i;
+const TRIGGER_RE = /prospek|penawaran|quotation|\bquote\b|follow[\s_-]*up/i;
 const STOP_RES = [/surv/i, /\bdeal\b/i, /fail|gagal|batal|lost/i, /non[\s_-]*client/i];
 export const isTriggerTag = (name) => TRIGGER_RE.test(name || '');
 export const isStopTag = (name) => STOP_RES.some((re) => re.test(name || ''));
@@ -430,12 +430,63 @@ export async function checkLateAlerts(nowMs = Date.now()) {
   return { sent: ids.length > 0, count: late.length, body };
 }
 
+// Pemulihan sekali jalan: tag "Penawaran" diganti nama menjadi "Prospek" sebelum
+// "prospek" dikenali sebagai tag pemicu, sehingga rekonsiliasi sempat
+// menghentikan urutannya (trigger_removed). Kembalikan ke kondisi semula.
+const RESTORE_KEY = 'followup_restore_prospek';
+export async function restoreStoppedByRename(nowMs = Date.now()) {
+  const { data: flag, error: flagErr } = await supabase.from('app_settings').select('value').eq('key', RESTORE_KEY).maybeSingle();
+  if (flagErr || flag?.value) return 0;
+  const tags = await fetchAll(() => supabase.from('tags').select('id, name').order('id', { ascending: true }));
+  const triggerIds = new Set(tags.filter((t) => isTriggerTag(t.name)).map((t) => String(t.id)));
+  const stopIds = new Set(tags.filter((t) => isStopTag(t.name)).map((t) => String(t.id)));
+  const { data: seqs, error } = await supabase.from('followup_sequences')
+    .select('id, conversation_id').eq('status', 'stopped').eq('stop_reason', 'trigger_removed')
+    .gte('updated_at', new Date(nowMs - 14 * DAY).toISOString());
+  if (error) throw error;
+
+  let restored = 0;
+  for (const seq of seqs || []) {
+    const [{ data: ct }, { data: conv }] = await Promise.all([
+      supabase.from('conversation_tags').select('tag_id').eq('conversation_id', seq.conversation_id),
+      supabase.from('conversations').select('status').eq('id', seq.conversation_id).maybeSingle(),
+    ]);
+    const ids = (ct || []).map((r) => String(r.tag_id));
+    if (!ids.some((id) => triggerIds.has(id)) || ids.some((id) => stopIds.has(id)) || !conv) continue;
+
+    // Tugas yang dibatalkan saat penghentian = tugas batal terbaru di urutan ini
+    const { data: last } = await supabase.from('followup_tasks').select('id')
+      .eq('sequence_id', seq.id).eq('status', 'cancelled')
+      .order('created_at', { ascending: false }).limit(1).maybeSingle();
+    const nowIso = new Date(nowMs).toISOString();
+    if (!last) {
+      await supabase.from('followup_sequences').update({ status: 'waiting', stop_reason: null, updated_at: nowIso }).eq('id', seq.id);
+    } else if (conv.status === 'resolved') {
+      await supabase.from('followup_sequences').update({ status: 'active', stop_reason: null, updated_at: nowIso }).eq('id', seq.id);
+      await supabase.from('followup_tasks').update({ status: 'pending' }).eq('id', last.id);
+    } else {
+      // Chat sedang aktif -> dijeda, dilanjutkan saat Resolved lagi
+      await supabase.from('followup_sequences').update({ status: 'paused', stop_reason: null, paused_at: nowIso, updated_at: nowIso }).eq('id', seq.id);
+      await supabase.from('followup_tasks').update({ status: 'paused' }).eq('id', last.id);
+    }
+    restored++;
+  }
+  await supabase.from('app_settings').upsert({ key: RESTORE_KEY, value: JSON.stringify({ at: new Date(nowMs).toISOString(), restored }), updated_at: new Date(nowMs).toISOString() }, { onConflict: 'key' });
+  if (restored) console.log(`[Followup] ${restored} urutan yang terhenti karena ganti nama tag dipulihkan`);
+  return restored;
+}
+
 export function startFollowupJob(intervalMs = 5 * 60 * 1000) {
   // Tabel belum dimigrasi -> diam saja (fitur belum aktif)
   const quiet = (label) => (e) => {
     if (!/followup_/.test(e?.message || '')) console.warn(`[Followup] ${label} gagal:`, e?.message || e);
   };
+  let restoreDone = false;
   const run = async () => {
+    if (!restoreDone) {
+      await restoreStoppedByRename().catch(quiet('pemulihan urutan'));
+      restoreDone = true;
+    }
     await reconcileFollowups().catch(quiet('rekonsiliasi'));
     await checkLateAlerts().catch(quiet('peringatan terlambat'));
   };

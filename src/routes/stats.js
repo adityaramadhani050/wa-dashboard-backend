@@ -15,11 +15,11 @@ const router = Router();
 //   menampilkan agent di regional tersebut.
 //
 // Definisi:
-// - Lead Baru / Lead Lama / Total Lead, Aktif, Resolved, Penawaran, Survey,
-//   Deal, Prospek: lihat blok "Lead periode" di dalam loop. Waktu resolve dari
+// - Lead Baru / Lead Lama / Total Lead, Aktif, Resolved, Prospek, Deal:
+//   lihat blok "Lead periode" di dalam loop. Waktu resolve dari
 //   kolom resolved_at, waktu tag dari conversation_tags.created_at + riwayat
 //   conversation_tag_events (fallback updated_at bila belum dimigrasi).
-// - Konversi      : Lead -> Prospek (Penawaran/Survey) -> Deal.
+// - Konversi      : Lead -> Prospek -> Deal.
 // - Respons       : tiap pesan customer yang menunggu balasan (sesi) dalam
 //                   periode -> waktu sampai agent membalas, dihitung dalam jam
 //                   kerja bila Jam Kerja aktif. Pesan bot tidak dihitung balasan.
@@ -34,8 +34,8 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const FAIL_RE = /fail|gagal|batal|lost|cancel/i;
 const NONCLIENT_RE = /non[\s_-]*client/i;
 const STAGES = [
-  { key: 'penawaran', re: /penawaran|quote|quotation/i },
-  { key: 'survey', re: /surv/i },
+  // Tag "Prospek" (dulu "Penawaran"; tag Survey lama ikut dianggap Prospek)
+  { key: 'prospek', re: /prospek|penawaran|quote|quotation|surv/i },
   { key: 'deal', re: /\bdeal\b|closing|closed|menang|berhasil|\bwon\b/i, not: /fail|gagal|batal|lost|cancel|tidak|non/i },
   { key: 'fail', re: FAIL_RE },
 ];
@@ -189,7 +189,7 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
     ctRows = r.data;
 
     // Riwayat pasang/lepas tag (tabel conversation_tag_events, opsional): tag
-    // yang sudah dilepas (mis. Penawaran diganti Deal/Fail) tetap terhitung.
+    // yang sudah dilepas (mis. Prospek diganti Deal/Fail) tetap terhitung.
     const ev = await fetchAll(() => supabase.from('conversation_tag_events')
       .select('id, conversation_id, tag_id, action, created_at')
       .in('tag_id', relevantTagIds.map(String))
@@ -232,7 +232,7 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
   const msgsByConv = {};
   for (const m of msgs) (msgsByConv[m.conversation_id] = msgsByConv[m.conversation_id] || []).push(m);
 
-  // Akhir periode: hari ini -> saat ini (status chat dibaca langsung).
+  // Akhir periode (batas waktu tag): hari ini -> saat ini.
   const nowMs = Date.now();
   const live = toMs > nowMs;
   const endMs = Math.min(toMs, nowMs);
@@ -241,7 +241,7 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
   const agentName = {};
   agentsList.forEach((a) => { agentName[a.id] = a.name; });
   const LEAD_KEYS = ['new_contacts', 'old_chats', 'total_leads', 'active', 'resolved', 'awaiting',
-    'penawaran', 'survey', 'deal', 'fail', 'prospek'];
+    'prospek', 'deal', 'fail'];
   const zeroLead = () => Object.fromEntries(LEAD_KEYS.map((k) => [k, 0]));
   const rows = {};
   for (const a of agentsList) {
@@ -289,12 +289,10 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
     // Lead Baru : kontak yang pertama kali chat dalam periode (dihitung sekali).
     // Lead Lama : kontak sebelum periode yang DIHUBUNGI AGENT dalam periode
     //             (ada pesan agent, bukan bot) dan belum Deal sebelum periode.
-    // Total Lead = Lead Baru + Lead Lama. Semua kolom berikut dihitung dari Total
-    // Lead, kondisi di AKHIR periode (hari ini = saat ini):
-    // - Resolved : sudah selesai (status Resolved) di akhir periode; Aktif = sisanya.
-    // - Penawaran/Survey : pernah diberi tag tsb sampai akhir periode.
+    // Total Lead = Lead Baru + Lead Lama. Dari Total Lead:
+    // - Aktif / Resolved : status chat SAAT INI (Aktif + Resolved = Total Lead).
+    // - Prospek : sudah diberi tag Prospek sampai akhir periode, atau langsung Deal.
     // - Deal/Fail : tag dipasang antara awal dan akhir periode.
-    // - Prospek  : Penawaran atau Survey (atau langsung Deal).
     if (!nc) {
       const evs = stageEvents[c.id] || [];
       const first = (key, min = -Infinity) =>
@@ -313,30 +311,13 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
         add(kind);
         add('total_leads');
 
-        let resolvedAtEnd;
-        if (live) resolvedAtEnd = !isActiveNow;
-        else if (!isActiveNow) {
-          // Resolved sekarang: selesai di akhir periode bila resolve terakhirnya <= akhir periode
-          const at = tsOf(c.resolved_at);
-          resolvedAtEnd = (Number.isFinite(at) ? at : tsOf(c.updated_at)) <= endMs;
-        } else {
-          // Aktif sekarang: dianggap selesai di akhir periode hanya bila di-resolve
-          // sebelum akhir periode dan baru dibuka lagi (ada pesan) setelahnya.
-          const ra = tsOf(c.resolved_at);
-          resolvedAtEnd = Number.isFinite(ra) && ra <= endMs
-            && !convMsgs.some((m) => { const t = tsOf(m.timestamp); return !m.sent_by_bot && t > ra && t <= endMs; });
-        }
-        add(resolvedAtEnd ? 'resolved' : 'active');
-        if (live && !resolvedAtEnd && c.last_from_me === false) add('awaiting');
+        add(isActiveNow ? 'active' : 'resolved');
+        if (isActiveNow && c.last_from_me === false) add('awaiting');
 
-        const pen = first('penawaran') <= endMs;
-        const sur = first('survey') <= endMs;
         const deal = first('deal', fromMs) <= endMs;
-        if (pen) add('penawaran');
-        if (sur) add('survey');
         if (deal) add('deal');
+        if (first('prospek') <= endMs || deal) add('prospek');
         if (first('fail', fromMs) <= endMs) add('fail');
-        if (pen || sur || deal) add('prospek');
       }
     }
 
@@ -404,8 +385,7 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
   const funnel = {
     stages: [
       { stage: 'Total Lead', count: summary.total_leads },
-      { stage: 'Penawaran', count: summary.penawaran },
-      { stage: 'Survey', count: summary.survey },
+      { stage: 'Prospek', count: summary.prospek },
       { stage: 'Deal', count: summary.deal },
     ],
     fail: summary.fail,
@@ -464,7 +444,7 @@ router.get('/agents', handle('agents', (a) => a.agents));
 // KPI respons: % pesan customer yang dibalas agent <= 5 menit
 router.get('/response-kpi', handle('response-kpi', (a) => a.kpi));
 
-// Funnel: Lead baru -> Penawaran -> Survey -> Deal (+ Fail), tag dalam periode
+// Funnel: Total Lead -> Prospek -> Deal (+ Fail)
 router.get('/funnel', handle('funnel', (a) => a.funnel));
 
 // Total kontak & kontak baru hari ini (WIB)
