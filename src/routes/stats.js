@@ -290,7 +290,8 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
     // Lead Lama : kontak sebelum periode yang DIHUBUNGI AGENT dalam periode
     //             (ada pesan agent, bukan bot) dan belum Deal sebelum periode.
     // Total Lead = Lead Baru + Lead Lama. Dari Total Lead:
-    // - Aktif / Resolved : status chat SAAT INI (Aktif + Resolved = Total Lead).
+    // - Aktif / Resolved : hari ini = status saat ini; periode lampau = sudah/belum
+    //   di-resolve sejak periode itu (Aktif + Resolved = Total Lead).
     // - Prospek : sudah diberi tag Prospek sampai akhir periode, atau langsung Deal.
     // - Deal/Fail : tag dipasang antara awal dan akhir periode.
     if (!nc) {
@@ -311,8 +312,19 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
         add(kind);
         add('total_leads');
 
-        add(isActiveNow ? 'active' : 'resolved');
-        if (isActiveNow && c.last_from_me === false) add('awaiting');
+        // Hari ini: status saat ini. Periode lampau: Resolved bila chat sudah
+        // di-resolve setelah aktivitas terakhirnya di periode itu, walau kini aktif
+        // lagi karena aktivitas baru (aktivitas baru itu masuk periode berikutnya).
+        let resolved = !isActiveNow;
+        if (!live && isActiveNow) {
+          const lastAct = convMsgs.reduce((m, x) => {
+            const t = tsOf(x.timestamp);
+            return inRange(t) && t > m ? t : m;
+          }, Number.isFinite(created) && inRange(created) ? created : fromMs);
+          resolved = tsOf(c.resolved_at) >= lastAct;
+        }
+        add(resolved ? 'resolved' : 'active');
+        if (live && isActiveNow && c.last_from_me === false) add('awaiting');
 
         const deal = first('deal', fromMs) <= endMs;
         if (deal) add('deal');
