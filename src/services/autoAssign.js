@@ -37,7 +37,49 @@ async function fetchAgents() {
   return [];
 }
 
-// Beban tiap agent = jumlah percakapan aktif (open/in_progress) yang di-assign ke dia.
+// Ambil semua baris (Supabase membatasi 1000 baris per query).
+async function fetchAll(build) {
+  const all = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await build().range(from, from + 999);
+    if (error) return all;
+    all.push(...(data || []));
+    if (!data || data.length < 1000) break;
+  }
+  return all;
+}
+
+// Awal hari ini dalam WIB (UTC+7) sebagai ISO UTC.
+function todayStartWibIso() {
+  const day = new Date(Date.now() + 7 * 3600 * 1000).toISOString().slice(0, 10);
+  return new Date(day + 'T00:00:00+07:00').toISOString();
+}
+
+// Jumlah kontak baru hari ini (WIB) yang percakapannya di-assign ke tiap agent.
+// Satu kontak dihitung sekali.
+async function newContactCountsToday() {
+  const contacts = await fetchAll(() => supabase
+    .from('contacts').select('id')
+    .gte('created_at', todayStartWibIso())
+    .order('id', { ascending: true }));
+  const ids = contacts.map((c) => c.id);
+  const byContact = new Map();
+  for (let i = 0; i < ids.length; i += 100) {
+    const { data } = await supabase
+      .from('conversations')
+      .select('contact_id, assigned_to')
+      .in('contact_id', ids.slice(i, i + 100))
+      .not('assigned_to', 'is', null);
+    (data || []).forEach((c) => { if (!byContact.has(c.contact_id)) byContact.set(c.contact_id, c.assigned_to); });
+  }
+  const counts = {};
+  for (const agentId of byContact.values()) counts[agentId] = (counts[agentId] || 0) + 1;
+  return counts;
+}
+
+// Beban tiap agent = jumlah KONTAK BARU hari ini (WIB) yang sudah di-assign ke dia.
+// Chat aktif tidak dipakai sebagai dasar karena bisa berasal dari follow-up
+// customer lama; hanya jadi penentu bila jumlah kontak baru sama.
 // Hanya agent TERSEDIA (available !== false) yang ikut. Bila `region` diisi,
 // hanya agent di regional tersebut.
 async function agentLoads({ region = null, excludeId = null } = {}) {
@@ -46,21 +88,27 @@ async function agentLoads({ region = null, excludeId = null } = {}) {
   if (excludeId != null) agents = agents.filter((a) => String(a.id) !== String(excludeId));
   if (!agents.length) return [];
 
-  const { data: convs } = await supabase
-    .from('conversations')
-    .select('assigned_to, status')
-    .in('status', ACTIVE_STATUSES);
+  const [newCounts, convs] = await Promise.all([
+    newContactCountsToday(),
+    fetchAll(() => supabase
+      .from('conversations')
+      .select('id, assigned_to')
+      .in('status', ACTIVE_STATUSES)
+      .not('assigned_to', 'is', null)
+      .order('id', { ascending: true })),
+  ]);
 
-  const load = {};
-  agents.forEach((a) => { load[a.id] = 0; });
-  (convs || []).forEach((c) => {
-    if (c.assigned_to != null && load[c.assigned_to] != null) load[c.assigned_to]++;
-  });
-  return agents.map((a) => ({ id: a.id, name: a.name, region: a.region || null, load: load[a.id] || 0 }));
+  const active = {};
+  convs.forEach((c) => { active[c.assigned_to] = (active[c.assigned_to] || 0) + 1; });
+  return agents.map((a) => ({
+    id: a.id, name: a.name, region: a.region || null,
+    load: newCounts[a.id] || 0,
+    active: active[a.id] || 0,
+  }));
 }
 
 function sortByLoad(arr) {
-  arr.sort((a, b) => a.load - b.load || (String(a.id) < String(b.id) ? -1 : 1));
+  arr.sort((a, b) => a.load - b.load || a.active - b.active || (String(a.id) < String(b.id) ? -1 : 1));
   return arr;
 }
 
@@ -128,14 +176,14 @@ export async function distributeUnassigned() {
 
   let res = await supabase
     .from('conversations')
-    .select('id, region, bot_state')
+    .select('id, region, bot_state, contact:contacts (created_at)')
     .is('assigned_to', null)
     .in('status', ACTIVE_STATUSES)
     .order('updated_at', { ascending: true });
   if (res.error) {
     res = await supabase
       .from('conversations')
-      .select('id')
+      .select('id, contact:contacts (created_at)')
       .is('assigned_to', null)
       .in('status', ACTIVE_STATUSES)
       .order('updated_at', { ascending: true });
@@ -143,7 +191,8 @@ export async function distributeUnassigned() {
   const unassigned = (res.data || []).filter((c) => !BOT_HOLD_STATES.includes(c.bot_state));
   if (!unassigned.length) return { assigned: 0 };
 
-  // Beban dihitung sekali per regional lalu diperbarui lokal tiap assignment.
+  // Beban (kontak baru hari ini + chat aktif) dihitung sekali per regional lalu
+  // diperbarui lokal tiap assignment.
   const loadsByRegion = {};
   const loadsFor = async (region) => {
     const key = region || '__all__';
@@ -151,8 +200,11 @@ export async function distributeUnassigned() {
     return loadsByRegion[key];
   };
 
+  const todayStart = new Date(todayStartWibIso()).getTime();
   let count = 0;
   for (const conv of unassigned) {
+    const created = conv.contact?.created_at ? new Date(conv.contact.created_at).getTime() : 0;
+    const isNewToday = created >= todayStart;
     const loads = sortByLoad(await loadsFor(conv.region || null));
     if (!loads.length) continue;
     const target = loads[0];
@@ -160,7 +212,7 @@ export async function distributeUnassigned() {
       // Agent yang sama bisa muncul di daftar global & regional -> sinkronkan bebannya
       for (const list of Object.values(loadsByRegion)) {
         const same = list.find((a) => String(a.id) === String(target.id));
-        if (same) same.load++;
+        if (same) { if (isNewToday) same.load++; same.active++; }
       }
       count++;
     }
