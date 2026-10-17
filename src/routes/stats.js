@@ -15,17 +15,11 @@ const router = Router();
 //   menampilkan agent di regional tersebut.
 //
 // Definisi:
-// - Lead Baru     : kontak yang PERTAMA KALI chat dalam periode.
-// - Chat Lama     : chat customer lama (kontak dibuat sebelum periode) yang
-//                   dihubungi agent dalam periode (follow-up), belum Deal sebelumnya.
-// - Aktif         : chat berstatus Open/Aktif SAAT INI (tidak tergantung periode,
-//                   hanya untuk kartu "Sedang Dihandle").
-// - Resolved      : chat yang di-resolve dalam periode (kolom resolved_at;
-//                   fallback updated_at bila kolom belum dimigrasi).
-// - Penawaran/Survey/Deal/Fail : tag ditambahkan dalam periode
-//                   (conversation_tags.created_at + riwayat conversation_tag_events;
-//                   fallback updated_at chat bila waktu pasang belum tercatat).
-// - Konversi      : per kohort Chat Baru / Chat Lama -> P/S -> Deal (lihat di dalam loop).
+// - Lead Baru / Lead Lama / Total Lead, Aktif, Resolved, Penawaran, Survey,
+//   Deal, Prospek: lihat blok "Lead periode" di dalam loop. Waktu resolve dari
+//   kolom resolved_at, waktu tag dari conversation_tags.created_at + riwayat
+//   conversation_tag_events (fallback updated_at bila belum dimigrasi).
+// - Konversi      : Lead -> Prospek (Penawaran/Survey) -> Deal.
 // - Respons       : tiap pesan customer yang menunggu balasan (sesi) dalam
 //                   periode -> waktu sampai agent membalas, dihitung dalam jam
 //                   kerja bila Jam Kerja aktif. Pesan bot tidak dihitung balasan.
@@ -238,21 +232,25 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
   const msgsByConv = {};
   for (const m of msgs) (msgsByConv[m.conversation_id] = msgsByConv[m.conversation_id] || []).push(m);
 
+  // Akhir periode: hari ini -> saat ini (status chat dibaca langsung).
+  const nowMs = Date.now();
+  const live = toMs > nowMs;
+  const endMs = Math.min(toMs, nowMs);
+
   // Baris agent (hanya role agent; filter regional = regional agent)
   const agentName = {};
   agentsList.forEach((a) => { agentName[a.id] = a.name; });
+  const LEAD_KEYS = ['new_contacts', 'old_chats', 'total_leads', 'active', 'resolved', 'awaiting',
+    'penawaran', 'survey', 'deal', 'fail', 'prospek'];
+  const zeroLead = () => Object.fromEntries(LEAD_KEYS.map((k) => [k, 0]));
   const rows = {};
   for (const a of agentsList) {
     if (a.role === 'admin') continue;
     if (region && a.region !== region) continue;
     rows[a.id] = {
       id: a.id, name: a.name, email: a.email,
-      new_contacts: 0,
-      open: 0, in_progress: 0, awaiting: 0,
-      resolved: 0, penawaran: 0, survey: 0, deal: 0, fail: 0,
+      ...zeroLead(),
       replies: 0, kpi_met: 0, unreplied: 0, _times: [],
-      new_total: 0, new_ps: 0, new_deal: 0, new_fail: 0,
-      old_total: 0, old_ps: 0, old_deal: 0, old_fail: 0,
     };
   }
 
@@ -260,20 +258,13 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
   const days = {};
   for (let d = fromMs; d < toMs; d += DAY) {
     const key = wibKey(d);
-    days[key] = { date: key, messages: 0, incoming: 0, outgoing: 0, new_contacts: 0, resolved_chats: 0, deals: 0 };
+    days[key] = { date: key, messages: 0, incoming: 0, outgoing: 0, new_contacts: 0, resolved_chats: 0 };
   }
 
   const summary = {
-    from: fromStr, to: toStr, region,
-    new_contacts: 0, new_assigned: 0, new_unassigned: 0,
-    old_chats: 0,
-    active: 0, awaiting: 0, active_unassigned: 0,
-    resolved: 0, total_contacts: 0,
-  };
-  const stageSets = { penawaran: new Set(), survey: new Set(), deal: new Set(), fail: new Set() };
-  const cohorts = {
-    new: { total: 0, ps: 0, deal: 0, fail: 0 },
-    old: { total: 0, ps: 0, deal: 0, fail: 0 },
+    from: fromStr, to: toStr, region, live,
+    ...zeroLead(),
+    new_assigned: 0, new_unassigned: 0, total_contacts: 0,
   };
   const kpiAgents = {}; // agentId | 'unassigned' -> { total, met, unreplied }
   let kpiTotal = 0, kpiMet = 0, unreplied = 0;
@@ -288,80 +279,71 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
     const convMsgs = msgsByConv[c.id] || [];
     const created = tsOf(c.contact?.created_at);
     const contactKey = c.contact_id || `conv:${c.id}`;
+    const status = c.status || 'open';
+    const isActiveNow = status === 'open' || status === 'in_progress';
+    const add = (k) => { summary[k]++; if (row) row[k]++; };
 
     if (!seenContacts.has(contactKey)) { seenContacts.add(contactKey); if (!nc) summary.total_contacts++; }
 
-    // Lead baru (satu kontak dihitung sekali)
-    const isNewLead = !nc && inRange(created) && !seenLeadContacts.has(contactKey);
-    if (isNewLead) {
-      seenLeadContacts.add(contactKey);
-      summary.new_contacts++;
-      if (c.assigned_to) summary.new_assigned++; else summary.new_unassigned++;
-      days[wibKey(created)].new_contacts++;
-      if (row) row.new_contacts++;
-    }
-
-    // Kohort periode + konversinya (dihitung sampai hari ini):
-    // - Chat Baru : lead baru periode ini.
-    // - Chat Lama : kontak sebelum periode yang DIHUBUNGI AGENT dalam periode
-    //               (ada pesan agent, bukan bot) dan belum Deal sebelum periode.
-    // - P/S       : sudah/pernah diberi tag Penawaran/Survey, atau Deal sejak awal periode.
-    // - Deal/Fail : tag Deal/Fail dipasang sejak awal periode.
+    // ── Lead periode ──────────────────────────────────────────────────────
+    // Lead Baru : kontak yang pertama kali chat dalam periode (dihitung sekali).
+    // Lead Lama : kontak sebelum periode yang DIHUBUNGI AGENT dalam periode
+    //             (ada pesan agent, bukan bot) dan belum Deal sebelum periode.
+    // Total Lead = Lead Baru + Lead Lama. Semua kolom berikut dihitung dari Total
+    // Lead, kondisi di AKHIR periode (hari ini = saat ini):
+    // - Resolved : sudah selesai (status Resolved) di akhir periode; Aktif = sisanya.
+    // - Penawaran/Survey : pernah diberi tag tsb sampai akhir periode.
+    // - Deal/Fail : tag dipasang antara awal dan akhir periode.
+    // - Prospek  : Penawaran atau Survey (atau langsung Deal).
     if (!nc) {
       const evs = stageEvents[c.id] || [];
       const first = (key, min = -Infinity) =>
         evs.reduce((m, e) => (e.key === key && e.at >= min && e.at < m ? e.at : m), Infinity);
-      const hasPS = Number.isFinite(Math.min(first('penawaran'), first('survey')));
-      const dealBefore = first('deal') < fromMs;
-      const dealAfter = Number.isFinite(first('deal', fromMs));
-      const failAfter = Number.isFinite(first('fail', fromMs));
-      let group = null;
-      if (isNewLead) group = 'new';
-      else if (!(created >= fromMs) && !dealBefore
-        && convMsgs.some((m) => m.from_me && !m.sent_by_bot && inRange(tsOf(m.timestamp)))) group = 'old';
-      if (group) {
-        const add = (k) => { cohorts[group][k]++; if (row) row[`${group}_${k}`]++; };
-        add('total');
-        if (hasPS || dealAfter) add('ps');
-        if (dealAfter) add('deal');
-        if (failAfter) add('fail');
+      let kind = null;
+      if (inRange(created) && !seenLeadContacts.has(contactKey)) kind = 'new_contacts';
+      else if (!(created >= fromMs) && !(first('deal') < fromMs)
+        && convMsgs.some((m) => m.from_me && !m.sent_by_bot && inRange(tsOf(m.timestamp)))) kind = 'old_chats';
+
+      if (kind) {
+        if (kind === 'new_contacts') {
+          seenLeadContacts.add(contactKey);
+          if (c.assigned_to) summary.new_assigned++; else summary.new_unassigned++;
+          days[wibKey(created)].new_contacts++;
+        }
+        add(kind);
+        add('total_leads');
+
+        let resolvedAtEnd;
+        if (live) resolvedAtEnd = !isActiveNow;
+        else if (!isActiveNow) {
+          // Resolved sekarang: selesai di akhir periode bila resolve terakhirnya <= akhir periode
+          const at = tsOf(c.resolved_at);
+          resolvedAtEnd = (Number.isFinite(at) ? at : tsOf(c.updated_at)) <= endMs;
+        } else {
+          // Aktif sekarang: dianggap selesai di akhir periode hanya bila di-resolve
+          // sebelum akhir periode dan baru dibuka lagi (ada pesan) setelahnya.
+          const ra = tsOf(c.resolved_at);
+          resolvedAtEnd = Number.isFinite(ra) && ra <= endMs
+            && !convMsgs.some((m) => { const t = tsOf(m.timestamp); return !m.sent_by_bot && t > ra && t <= endMs; });
+        }
+        add(resolvedAtEnd ? 'resolved' : 'active');
+        if (live && !resolvedAtEnd && c.last_from_me === false) add('awaiting');
+
+        const pen = first('penawaran') <= endMs;
+        const sur = first('survey') <= endMs;
+        const deal = first('deal', fromMs) <= endMs;
+        if (pen) add('penawaran');
+        if (sur) add('survey');
+        if (deal) add('deal');
+        if (first('fail', fromMs) <= endMs) add('fail');
+        if (pen || sur || deal) add('prospek');
       }
     }
 
-    // Aktif saat ini
-    const status = c.status || 'open';
-    const isActive = status === 'open' || status === 'in_progress';
-    if (isActive) {
-      if (c.assigned_to) {
-        summary.active++;
-        if (c.last_from_me === false) summary.awaiting++;
-      } else summary.active_unassigned++;
-      if (row) {
-        row[status]++;
-        if (c.last_from_me === false) row.awaiting++;
-      }
-    }
-
-    // Resolved dalam periode
+    // Resolved per hari (grafik, semua chat)
     if (!nc && status === 'resolved') {
       const at = tsOf(c.resolved_at) || tsOf(c.updated_at);
-      if (inRange(at)) {
-        summary.resolved++;
-        days[wibKey(at)].resolved_chats++;
-        if (row) row.resolved++;
-      }
-    }
-
-    // Tag tahap dalam periode (satu chat dihitung sekali per tahap)
-    if (!nc) {
-      const done = new Set();
-      for (const ev of stageEvents[c.id] || []) {
-        if (!inRange(ev.at) || done.has(ev.key)) continue;
-        done.add(ev.key);
-        stageSets[ev.key].add(c.id);
-        if (row) row[ev.key]++;
-        if (ev.key === 'deal') days[wibKey(ev.at)].deals++;
-      }
+      if (inRange(at)) days[wibKey(at)].resolved_chats++;
     }
 
     // Respons agent
@@ -372,7 +354,7 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
         const ka = (kpiAgents[key] = kpiAgents[key] || { total: 0, met: 0, unreplied: 0 });
         if (s.end == null) {
           // Hanya chat yang masih aktif = benar-benar menunggu balasan
-          if (isActive) { unreplied++; ka.unreplied++; if (row) row.unreplied++; }
+          if (isActiveNow) { unreplied++; ka.unreplied++; if (row) row.unreplied++; }
           continue;
         }
         const mins = workMinutes(s.from, s.end, wh);
@@ -395,9 +377,8 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
 
   const agents = Object.values(rows).map(({ _times, ...a }) => ({
     ...a,
-    lead: a.new_contacts,
-    old_chats: a.old_total,
-    total: a.new_total + a.old_total,
+    lead: a.total_leads,
+    total: a.total_leads,
     avgResponse: _times.length ? Math.round(_times.reduce((s, t) => s + t, 0) / _times.length) : null,
   }));
 
@@ -422,17 +403,14 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
 
   const funnel = {
     stages: [
-      { stage: 'Lead', count: summary.new_contacts },
-      { stage: 'Penawaran', count: stageSets.penawaran.size },
-      { stage: 'Survey', count: stageSets.survey.size },
-      { stage: 'Deal', count: stageSets.deal.size },
+      { stage: 'Total Lead', count: summary.total_leads },
+      { stage: 'Penawaran', count: summary.penawaran },
+      { stage: 'Survey', count: summary.survey },
+      { stage: 'Deal', count: summary.deal },
     ],
-    fail: stageSets.fail.size,
-    cohorts,
+    fail: summary.fail,
+    conversion: { lead: summary.total_leads, prospek: summary.prospek, deal: summary.deal },
   };
-  summary.deal = stageSets.deal.size;
-  summary.old_chats = cohorts.old.total;
-  summary.cohorts = cohorts;
   summary.tag_times = tagTimes;
   summary.tag_history = tagHistory;
 
