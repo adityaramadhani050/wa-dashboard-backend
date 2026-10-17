@@ -16,15 +16,16 @@ const router = Router();
 //
 // Definisi:
 // - Lead Baru     : kontak yang PERTAMA KALI chat dalam periode.
-// - Chat Lama     : chat customer lama (kontak dibuat sebelum periode) yang ada
-//                   pesan agent/customer dalam periode (mis. follow-up).
-// - Aktif         : chat berstatus Open/Aktif SAAT INI (tidak tergantung periode).
+// - Chat Lama     : chat customer lama (kontak dibuat sebelum periode) yang
+//                   dihubungi agent dalam periode (follow-up), belum Deal sebelumnya.
+// - Aktif         : chat berstatus Open/Aktif SAAT INI (tidak tergantung periode,
+//                   hanya untuk kartu "Sedang Dihandle").
 // - Resolved      : chat yang di-resolve dalam periode (kolom resolved_at;
 //                   fallback updated_at bila kolom belum dimigrasi).
 // - Penawaran/Survey/Deal/Fail : tag ditambahkan dalam periode
 //                   (conversation_tags.created_at + riwayat conversation_tag_events;
 //                   fallback updated_at chat bila waktu pasang belum tercatat).
-// - Konversi      : Lead -> Penawaran/Survey -> Deal (lihat di dalam loop).
+// - Konversi      : per kohort Chat Baru / Chat Lama -> P/S -> Deal (lihat di dalam loop).
 // - Respons       : tiap pesan customer yang menunggu balasan (sesi) dalam
 //                   periode -> waktu sampai agent membalas, dihitung dalam jam
 //                   kerja bila Jam Kerja aktif. Pesan bot tidak dihitung balasan.
@@ -246,11 +247,12 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
     if (region && a.region !== region) continue;
     rows[a.id] = {
       id: a.id, name: a.name, email: a.email,
-      new_contacts: 0, old_chats: 0,
+      new_contacts: 0,
       open: 0, in_progress: 0, awaiting: 0,
       resolved: 0, penawaran: 0, survey: 0, deal: 0, fail: 0,
       replies: 0, kpi_met: 0, unreplied: 0, _times: [],
-      conv_lead: 0, conv_lead_ps: 0, conv_lead_deal: 0, conv_ps: 0, conv_ps_deal: 0,
+      new_total: 0, new_ps: 0, new_deal: 0, new_fail: 0,
+      old_total: 0, old_ps: 0, old_deal: 0, old_fail: 0,
     };
   }
 
@@ -269,7 +271,10 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
     resolved: 0, total_contacts: 0,
   };
   const stageSets = { penawaran: new Set(), survey: new Set(), deal: new Set(), fail: new Set() };
-  const conversion = { lead: 0, lead_ps: 0, lead_deal: 0, ps: 0, ps_deal: 0 };
+  const cohorts = {
+    new: { total: 0, ps: 0, deal: 0, fail: 0 },
+    old: { total: 0, ps: 0, deal: 0, fail: 0 },
+  };
   const kpiAgents = {}; // agentId | 'unassigned' -> { total, met, unreplied }
   let kpiTotal = 0, kpiMet = 0, unreplied = 0;
   const seenContacts = new Set();
@@ -296,10 +301,31 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
       if (row) row.new_contacts++;
     }
 
-    // Chat lama yang aktif dalam periode
-    if (!nc && !(created >= fromMs) && convMsgs.some((m) => !m.sent_by_bot && inRange(tsOf(m.timestamp)))) {
-      summary.old_chats++;
-      if (row) row.old_chats++;
+    // Kohort periode + konversinya (dihitung sampai hari ini):
+    // - Chat Baru : lead baru periode ini.
+    // - Chat Lama : kontak sebelum periode yang DIHUBUNGI AGENT dalam periode
+    //               (ada pesan agent, bukan bot) dan belum Deal sebelum periode.
+    // - P/S       : sudah/pernah diberi tag Penawaran/Survey, atau Deal sejak awal periode.
+    // - Deal/Fail : tag Deal/Fail dipasang sejak awal periode.
+    if (!nc) {
+      const evs = stageEvents[c.id] || [];
+      const first = (key, min = -Infinity) =>
+        evs.reduce((m, e) => (e.key === key && e.at >= min && e.at < m ? e.at : m), Infinity);
+      const hasPS = Number.isFinite(Math.min(first('penawaran'), first('survey')));
+      const dealBefore = first('deal') < fromMs;
+      const dealAfter = Number.isFinite(first('deal', fromMs));
+      const failAfter = Number.isFinite(first('fail', fromMs));
+      let group = null;
+      if (isNewLead) group = 'new';
+      else if (!(created >= fromMs) && !dealBefore
+        && convMsgs.some((m) => m.from_me && !m.sent_by_bot && inRange(tsOf(m.timestamp)))) group = 'old';
+      if (group) {
+        const add = (k) => { cohorts[group][k]++; if (row) row[`${group}_${k}`]++; };
+        add('total');
+        if (hasPS || dealAfter) add('ps');
+        if (dealAfter) add('deal');
+        if (failAfter) add('fail');
+      }
     }
 
     // Aktif saat ini
@@ -338,30 +364,6 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
       }
     }
 
-    // Konversi bertahap: Lead (tanpa status) -> Penawaran/Survey -> Deal.
-    // - Lead -> P/S : dari lead baru periode ini, berapa yang (sampai sekarang)
-    //                 sudah diberi tag Penawaran/Survey (atau langsung Deal).
-    // - P/S -> Deal : dari chat yang MASUK tahap Penawaran/Survey dalam periode
-    //                 (tag P/S pertama), berapa yang kemudian Deal. Deal tanpa
-    //                 tag P/S dianggap melewati P/S saat Deal.
-    if (!nc) {
-      const evs = stageEvents[c.id] || [];
-      const firstOf = (keys) => evs.reduce((m, e) => (keys.includes(e.key) && e.at < m ? e.at : m), Infinity);
-      const firstPS = firstOf(['penawaran', 'survey']);
-      const firstDeal = firstOf(['deal']);
-      const bump = (k) => { conversion[k]++; if (row) row[`conv_${k}`]++; };
-      if (isNewLead) {
-        bump('lead');
-        if (Number.isFinite(firstPS) || Number.isFinite(firstDeal)) bump('lead_ps');
-        if (Number.isFinite(firstDeal)) bump('lead_deal');
-      }
-      const psEntry = Number.isFinite(firstPS) ? firstPS : firstDeal;
-      if (inRange(psEntry)) {
-        bump('ps');
-        if (firstDeal >= psEntry && Number.isFinite(firstDeal)) bump('ps_deal');
-      }
-    }
-
     // Respons agent
     if (!nc) {
       const key = c.assigned_to || 'unassigned';
@@ -394,7 +396,8 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
   const agents = Object.values(rows).map(({ _times, ...a }) => ({
     ...a,
     lead: a.new_contacts,
-    total: a.new_contacts + a.old_chats,
+    old_chats: a.old_total,
+    total: a.new_total + a.old_total,
     avgResponse: _times.length ? Math.round(_times.reduce((s, t) => s + t, 0) / _times.length) : null,
   }));
 
@@ -425,9 +428,11 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
       { stage: 'Deal', count: stageSets.deal.size },
     ],
     fail: stageSets.fail.size,
-    conversion,
+    cohorts,
   };
   summary.deal = stageSets.deal.size;
+  summary.old_chats = cohorts.old.total;
+  summary.cohorts = cohorts;
   summary.tag_times = tagTimes;
   summary.tag_history = tagHistory;
 
