@@ -61,6 +61,33 @@ function agentResponseMinutes(msgs) {
   return (new Date(firstOut.timestamp) - new Date(start)) / 60000;
 }
 
+// Map contact_id -> agent yang di-assign, untuk kontak yang dibuat dalam rentang
+// hari WIB fromStr..toStr (default 30 hari terakhir). Kontak tanpa percakapan
+// ter-assign tidak masuk map.
+async function newContactAssignments(fromStr, toStr, region) {
+  const TZ = 7 * 3600 * 1000;
+  const to = toStr || new Date(Date.now() + TZ).toISOString().slice(0, 10);
+  const from = fromStr || new Date(new Date(to + 'T00:00:00Z').getTime() - 29 * 86400000).toISOString().slice(0, 10);
+  const { data: contacts, error } = await fetchAll(() => supabase
+    .from('contacts')
+    .select(region ? 'id, region' : 'id')
+    .gte('created_at', new Date(from + 'T00:00:00+07:00').toISOString())
+    .lte('created_at', new Date(to + 'T23:59:59+07:00').toISOString())
+    .order('id', { ascending: true }));
+  const map = new Map();
+  if (error || !contacts?.length) return map;
+  const ids = contacts.filter((c) => !region || c.region === region).map((c) => c.id);
+  for (let i = 0; i < ids.length; i += 100) {
+    const { data: convs } = await supabase
+      .from('conversations')
+      .select('contact_id, assigned_to')
+      .in('contact_id', ids.slice(i, i + 100))
+      .not('assigned_to', 'is', null);
+    (convs || []).forEach((c) => { if (!map.has(c.contact_id)) map.set(c.contact_id, c.assigned_to); });
+  }
+  return map;
+}
+
 // Daily message stats — supports ?from=YYYY-MM-DD&to=YYYY-MM-DD
 // Also upserts each day's stats into daily_stats table
 router.get('/daily', async (req, res) => {
@@ -298,6 +325,14 @@ router.get('/agents', async (req, res) => {
 
       const diffMin = agentResponseMinutes(msgsByConv[conv.id] || []);
       if (diffMin != null) agent._responseTimes.push(diffMin);
+    }
+
+    // Kontak baru dalam periode (batas hari WIB, sama dengan kartu "Kontak Baru")
+    // yang percakapannya di-assign ke agent. Satu kontak dihitung sekali.
+    for (const a of Object.values(agentById)) a.new_contacts = 0;
+    const newContactAgent = await newContactAssignments(req.query.from, req.query.to, region);
+    for (const agentId of newContactAgent.values()) {
+      if (agentById[agentId]) agentById[agentId].new_contacts++;
     }
 
     const result = Object.values(agentById)
