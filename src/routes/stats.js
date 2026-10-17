@@ -22,7 +22,9 @@ const router = Router();
 // - Resolved      : chat yang di-resolve dalam periode (kolom resolved_at;
 //                   fallback updated_at bila kolom belum dimigrasi).
 // - Penawaran/Survey/Deal/Fail : tag ditambahkan dalam periode
-//                   (conversation_tags.created_at; fallback updated_at chat).
+//                   (conversation_tags.created_at + riwayat conversation_tag_events;
+//                   fallback updated_at chat bila waktu pasang belum tercatat).
+// - Konversi      : Lead -> Penawaran/Survey -> Deal (lihat di dalam loop).
 // - Respons       : tiap pesan customer yang menunggu balasan (sesi) dalam
 //                   periode -> waktu sampai agent membalas, dihitung dalam jam
 //                   kerja bila Jam Kerja aktif. Pesan bot tidak dihitung balasan.
@@ -176,22 +178,51 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
   const relevantTagIds = tags.filter((t) => tagStage[t.id] || nonClientTagIds.has(t.id)).map((t) => t.id);
   const convById = new Map(convs.map((c) => [c.id, c]));
 
+  // Tag yang menempel sekarang (+ waktu pasang bila kolom created_at sudah ada)
   let ctRows = [];
+  let tagTimes = true;
+  let tagHistory = false;
+  let tagEvents = [];
   if (relevantTagIds.length) {
-    ctRows = await fetchAllCols(['conversation_id, tag_id, created_at', 'conversation_id, tag_id'],
-      (cols) => supabase.from('conversation_tags').select(cols)
-        .in('tag_id', relevantTagIds)
-        .order('conversation_id', { ascending: true })
-        .order('tag_id', { ascending: true }));
+    const build = (cols) => supabase.from('conversation_tags').select(cols)
+      .in('tag_id', relevantTagIds)
+      .order('conversation_id', { ascending: true })
+      .order('tag_id', { ascending: true });
+    let r = await fetchAll(() => build('conversation_id, tag_id, created_at'));
+    if (r.error) { tagTimes = false; r = await fetchAll(() => build('conversation_id, tag_id')); }
+    if (r.error) throw r.error;
+    ctRows = r.data;
+
+    // Riwayat pasang/lepas tag (tabel conversation_tag_events, opsional): tag
+    // yang sudah dilepas (mis. Penawaran diganti Deal/Fail) tetap terhitung.
+    const ev = await fetchAll(() => supabase.from('conversation_tag_events')
+      .select('id, conversation_id, tag_id, action, created_at')
+      .in('tag_id', relevantTagIds.map(String))
+      .order('id', { ascending: true }));
+    if (!ev.error) { tagHistory = true; tagEvents = ev.data; }
   }
   const nonClient = new Set();
   const stageEvents = {}; // conv_id -> [{ key, at }]
+  const pushStage = (convId, tagId, at) => {
+    const key = tagStage[tagId]; // kunci objek = String(id), cocok untuk id angka maupun teks
+    if (!key || !Number.isFinite(at)) return;
+    (stageEvents[convId] = stageEvents[convId] || []).push({ key, at });
+  };
   for (const r of ctRows) {
     if (nonClientTagIds.has(r.tag_id)) { nonClient.add(r.conversation_id); continue; }
-    const key = tagStage[r.tag_id];
-    if (!key) continue;
-    const at = tsOf(r.created_at) || tsOf(convById.get(r.conversation_id)?.updated_at);
-    (stageEvents[r.conversation_id] = stageEvents[r.conversation_id] || []).push({ key, at });
+    pushStage(r.conversation_id, r.tag_id, tsOf(r.created_at) || tsOf(convById.get(r.conversation_id)?.updated_at));
+  }
+  // Tag yang dipasang lalu dilepas < 1 jam dianggap salah pasang -> diabaikan.
+  const removedAt = {};
+  for (const e of tagEvents) {
+    if (e.action === 'remove') (removedAt[`${e.conversation_id}|${e.tag_id}`] ||= []).push(tsOf(e.created_at));
+  }
+  for (const e of tagEvents) {
+    if (e.action !== 'add') continue;
+    const at = tsOf(e.created_at);
+    const removes = removedAt[`${e.conversation_id}|${e.tag_id}`] || [];
+    if (removes.some((rm) => rm >= at && rm - at < 3600000)) continue;
+    pushStage(e.conversation_id, e.tag_id, at);
   }
 
   // Pesan sejak 3 hari sebelum periode (agar sesi tunggu yang dimulai sebelum
@@ -219,6 +250,7 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
       open: 0, in_progress: 0, awaiting: 0,
       resolved: 0, penawaran: 0, survey: 0, deal: 0, fail: 0,
       replies: 0, kpi_met: 0, unreplied: 0, _times: [],
+      conv_lead: 0, conv_lead_ps: 0, conv_lead_deal: 0, conv_ps: 0, conv_ps_deal: 0,
     };
   }
 
@@ -237,6 +269,7 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
     resolved: 0, total_contacts: 0,
   };
   const stageSets = { penawaran: new Set(), survey: new Set(), deal: new Set(), fail: new Set() };
+  const conversion = { lead: 0, lead_ps: 0, lead_deal: 0, ps: 0, ps_deal: 0 };
   const kpiAgents = {}; // agentId | 'unassigned' -> { total, met, unreplied }
   let kpiTotal = 0, kpiMet = 0, unreplied = 0;
   const seenContacts = new Set();
@@ -305,6 +338,30 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
       }
     }
 
+    // Konversi bertahap: Lead (tanpa status) -> Penawaran/Survey -> Deal.
+    // - Lead -> P/S : dari lead baru periode ini, berapa yang (sampai sekarang)
+    //                 sudah diberi tag Penawaran/Survey (atau langsung Deal).
+    // - P/S -> Deal : dari chat yang MASUK tahap Penawaran/Survey dalam periode
+    //                 (tag P/S pertama), berapa yang kemudian Deal. Deal tanpa
+    //                 tag P/S dianggap melewati P/S saat Deal.
+    if (!nc) {
+      const evs = stageEvents[c.id] || [];
+      const firstOf = (keys) => evs.reduce((m, e) => (keys.includes(e.key) && e.at < m ? e.at : m), Infinity);
+      const firstPS = firstOf(['penawaran', 'survey']);
+      const firstDeal = firstOf(['deal']);
+      const bump = (k) => { conversion[k]++; if (row) row[`conv_${k}`]++; };
+      if (isNewLead) {
+        bump('lead');
+        if (Number.isFinite(firstPS) || Number.isFinite(firstDeal)) bump('lead_ps');
+        if (Number.isFinite(firstDeal)) bump('lead_deal');
+      }
+      const psEntry = Number.isFinite(firstPS) ? firstPS : firstDeal;
+      if (inRange(psEntry)) {
+        bump('ps');
+        if (firstDeal >= psEntry && Number.isFinite(firstDeal)) bump('ps_deal');
+      }
+    }
+
     // Respons agent
     if (!nc) {
       const key = c.assigned_to || 'unassigned';
@@ -368,8 +425,11 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
       { stage: 'Deal', count: stageSets.deal.size },
     ],
     fail: stageSets.fail.size,
+    conversion,
   };
   summary.deal = stageSets.deal.size;
+  summary.tag_times = tagTimes;
+  summary.tag_history = tagHistory;
 
   return { summary, agents, kpi, funnel, daily: Object.values(days) };
 }
