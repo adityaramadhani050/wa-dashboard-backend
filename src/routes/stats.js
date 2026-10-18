@@ -321,7 +321,20 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
             const t = tsOf(x.timestamp);
             return inRange(t) && t > m ? t : m;
           }, Number.isFinite(created) && inRange(created) ? created : fromMs);
-          resolved = tsOf(c.resolved_at) >= lastAct;
+          // Selain resolved_at (hanya resolve TERAKHIR, kosong untuk resolve sebelum
+          // migrasi), jeda >= 24 jam tanpa pesan setelah aktivitas itu berarti chat
+          // sudah ditutup auto-resolve lalu dibuka lagi oleh aktivitas baru.
+          let closedByGap = false;
+          let prev = lastAct;
+          for (const x of convMsgs) {
+            const t = tsOf(x.timestamp);
+            if (t <= lastAct) continue;
+            if (t - prev >= DAY) { closedByGap = true; break; }
+            prev = t;
+          }
+          // Pesan diambil sampai 3 hari setelah periode: sunyi >= 24 jam di ujungnya juga berarti tertutup
+          if (!closedByGap && Math.min(toMs + 3 * DAY, nowMs) - prev >= DAY) closedByGap = true;
+          resolved = closedByGap || tsOf(c.resolved_at) >= lastAct;
         }
         add(resolved ? 'resolved' : 'active');
         if (live && isActiveNow && c.last_from_me === false) add('awaiting');
