@@ -10,7 +10,7 @@ import { supabase } from '../db/supabase.js';
 import { generate, aiEnabled } from './llm.js';
 
 const MAX_SKILLS = 3;
-const MAX_SKILL_CHARS = 5000;   // total isi skill per balasan (hemat token)
+const MAX_SKILL_CHARS = 10000;  // total isi skill per balasan (hemat token)
 const MAX_LESSONS = 5;
 
 // ── Pencocokan teks sederhana (Bahasa Indonesia) ──────────────────────────

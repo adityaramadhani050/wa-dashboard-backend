@@ -30,6 +30,7 @@ export const DEFAULT_AI_SALES = {
   enabled: false,
   agent_id: null,
   persona_name: '',          // kosong = nama akun agent
+  company: 'Renus',          // nama perusahaan yang disebut AI
   style: 'santai',           // santai | sopan
   instructions: '',          // aturan/info tambahan dari admin
   reply_delay_sec: 10,       // tunggu pesan beruntun sebelum membalas
@@ -45,6 +46,7 @@ export function parseAiSales(raw) {
     enabled: !!v.enabled,
     agent_id: v.agent_id || null,
     persona_name: String(v.persona_name || '').slice(0, 40),
+    company: String(v.company ?? DEFAULT_AI_SALES.company).trim().slice(0, 60) || DEFAULT_AI_SALES.company,
     style: v.style === 'sopan' ? 'sopan' : 'santai',
     instructions: String(v.instructions || '').slice(0, 3000),
     reply_delay_sec: Number.isNaN(delay) ? DEFAULT_AI_SALES.reply_delay_sec : Math.min(120, Math.max(3, delay)),
@@ -240,11 +242,11 @@ function historyText(msgs, persona) {
 // Prompt TETAP (sama untuk semua chat selama pengaturan tidak berubah) -> diletakkan
 // di depan agar penyedia model bisa memakai prompt cache (lebih murah). Data yang
 // berubah per chat ada di buildChatContext() dan dikirim di bagian akhir.
-export function buildSystemPrompt({ persona, style, instructions, ctx, lowercase = true }) {
+export function buildSystemPrompt({ persona, style, instructions, ctx, lowercase = true, company = 'Renus' }) {
   const tone = style === 'sopan'
     ? 'sopan & profesional tapi tetap hangat, hindari singkatan alay'
     : 'santai, ramah, khas chat WA sales Indonesia (singkatan WA wajar seperti "yg", "utk", "kalo")';
-  return `Kamu adalah ${persona}, sales PLTS (panel surya) RenusPro yang sedang membalas chat WhatsApp customer secara langsung. Kamu sales manusia sungguhan dari sudut pandang customer: tulis seperti orang yang mengetik di HP.
+  return `Kamu adalah ${persona}, sales PLTS (panel surya) ${company} yang sedang membalas chat WhatsApp customer secara langsung. Kamu sales manusia sungguhan dari sudut pandang customer: tulis seperti orang yang mengetik di HP.
 
 TUJUAN: bawa customer bertahap dari kenal -> paham kebutuhan & solusi -> SETUJU SURVEI LOKASI GRATIS. Batas wewenangmu: mengumpulkan data & usulan jadwal survei. Konfirmasi jadwal survei & Deal dilakukan admin — jangan pernah menjanjikan jadwal pasti atau menyatakan deal.
 
@@ -266,7 +268,7 @@ ARTI TAG CHAT (lihat TAG CHAT pada pesan):
 - "Fail": customer tidak lanjut -> balas sopan & ringan, jangan memaksa.
 
 DI LUAR KEMAMPUAN (komplain, garansi/servis unit terpasang, minta ditelepon, permintaan khusus yang tidak bisa kamu jawab): balas sopan bahwa kamu cek/teruskan dulu ke tim, dan isi "notify_admin" dengan ringkasannya.
-Bila customer bertanya apakah kamu bot/AI: jangan berbohong — jawab santai bahwa kamu dibantu sistem tim RenusPro, lalu lanjutkan membantu.
+Bila customer bertanya apakah kamu bot/AI: jangan berbohong — jawab santai bahwa kamu dibantu sistem tim ${company}, lalu lanjutkan membantu.
 Media yang tidak bisa kamu lihat (gambar/dokumen/pesan suara): minta customer menjelaskan singkat lewat teks.
 
 SAPAAN CUSTOMER (lihat DATA CUSTOMER pada pesan; nama WhatsApp belum tentu nama asli, jangan dipakai menebak):
@@ -313,10 +315,10 @@ async function generateReply({ conversationId, contactId, waName = '', msgs, cfg
   const chatText = msgs.filter((m) => !m.from_me).slice(-4).map((m) => m.body || '').join('\n');
   const ctx = await buildSalesContext(conversationId, { chatText: `${chatText}\n${task}` });
   let knowledge = { text: '', used: null };
-  try { knowledge = await buildKnowledge({ contactId, chatText }); } catch (e) { console.warn('[AISales] pengetahuan gagal dimuat:', e?.message || e); }
+  try { knowledge = await buildKnowledge({ contactId, chatText: task ? `${chatText}\n${task}` : chatText }); } catch (e) { console.warn('[AISales] pengetahuan gagal dimuat:', e?.message || e); }
   if (knowledge.used?.skills?.length) console.log(`[AISales] conv=${conversationId} skill: ${knowledge.used.skills.map((s) => s.title).join(', ')}`);
   const result = await generate(task ? 'ai_followup' : 'ai_sales_reply', {
-    system: buildSystemPrompt({ persona, style: cfg.style, instructions: cfg.instructions, ctx, lowercase: cfg.lowercase }),
+    system: buildSystemPrompt({ persona, style: cfg.style, instructions: cfg.instructions, ctx, lowercase: cfg.lowercase, company: cfg.company }),
     prompt: `${buildChatContext({ ctx, knowledge: knowledge.text, fuTask, waName, salutation })}\n\nRIWAYAT CHAT (15 pesan terakhir, terbaru di bawah; konteks lebih lama ada di INGATAN):\n${historyText(msgs.slice(-HISTORY_LIMIT), persona)}\n\n${task || 'Balas pesan customer yang terakhir.'}`,
     json: true,
     maxTokens: 600,
