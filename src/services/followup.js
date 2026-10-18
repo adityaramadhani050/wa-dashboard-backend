@@ -259,6 +259,20 @@ export async function onTagsChanged(conversationId) {
   }
 }
 
+// AI Sales: perbarui hasil tugas follow-up yang dikirim AI berdasarkan balasan
+// customer (tugas sudah 'done' dengan hasil sementara 'Tidak dibalas').
+export async function applyAiOutcome(taskId, outcome, objectionCategory = null) {
+  if (!['considering', 'objection', 'later', 'interested', 'lost'].includes(outcome)) return false;
+  const { data: task } = await supabase.from('followup_tasks').select('id, sequence_id').eq('id', taskId).maybeSingle();
+  if (!task) return false;
+  await supabase.from('followup_tasks').update({
+    outcome,
+    objection_category: outcome === 'objection' && OBJECTIONS[objectionCategory] ? objectionCategory : null,
+  }).eq('id', taskId);
+  if ((outcome === 'interested' || outcome === 'lost') && task.sequence_id) await stopSequence(task.sequence_id, `outcome:${outcome}`);
+  return true;
+}
+
 // Agent menyelesaikan tugas + hasil (wajib).
 export async function completeTask(taskId, { outcome, objection_category, note, next_contact_at } = {}, userId = null) {
   if (!OUTCOMES[outcome]) throw Object.assign(new Error('Pilih hasil follow-up'), { status: 400 });
