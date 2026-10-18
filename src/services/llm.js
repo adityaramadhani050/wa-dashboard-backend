@@ -68,6 +68,30 @@ export async function saveAiModels(input) {
   return val;
 }
 
+// Model yang butuh mode kompatibel (tanpa pesan system / reasoning / response_format)
+const compatModels = new Set();
+function toCompat(body) {
+  const sys = body.messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
+  const user = body.messages.filter((m) => m.role !== 'system');
+  if (sys && user.length) user[0] = { ...user[0], content: `${sys}\n\n---\n\n${user[0].content}` };
+  body.messages = user;
+  delete body.reasoning;
+  delete body.response_format;
+  delete body.top_p;
+}
+
+// Pesan error OpenRouter + pesan asli dari penyedia (metadata.raw) agar mudah ditelusuri
+function errorText(err) {
+  if (!err) return '';
+  let raw = err.metadata?.raw;
+  if (raw && typeof raw !== 'string') raw = JSON.stringify(raw);
+  if (raw) {
+    try { const j = JSON.parse(raw); raw = j.error?.message || j.message || raw; } catch { /* teks biasa */ }
+  }
+  const provider = err.metadata?.provider_name ? ` [${err.metadata.provider_name}]` : '';
+  return `${err.message || 'gagal'}${provider}${raw ? ` — ${String(raw).slice(0, 240)}` : ''}`;
+}
+
 class AiError extends Error {
   constructor(message, status) { super(message); this.status = status; }
 }
@@ -106,18 +130,20 @@ async function callOnce(model, { system, prompt, json, maxTokens, temperature, t
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(TIMEOUT_MS),
   });
-  let res = await post();
-  let data = await res.json().catch(() => ({}));
-  // Model yang wajib "berpikir" / tidak mendukung format JSON -> ulangi tanpa parameter itu
-  if (res.status === 400 && /reason|response_format|json/i.test(data.error?.message || '')) {
-    body.reasoning = { exclude: true };
-    delete body.response_format;
-    res = await post();
-    data = await res.json().catch(() => ({}));
+  const send = async () => { const res = await post(); return { res, data: await res.json().catch(() => ({})) }; };
+  if (compatModels.has(model)) toCompat(body);
+  let { res, data } = await send();
+  // Sebagian model/penyedia (mis. Gemma) menolak pesan "system", parameter reasoning
+  // atau format JSON -> ulangi dalam mode kompatibel & ingat untuk panggilan berikutnya
+  const st = Number(data.error?.code || res.status);
+  if (!compatModels.has(model) && (st === 400 || st === 422 || /provider returned error/i.test(data.error?.message || ''))) {
+    toCompat(body);
+    ({ res, data } = await send());
+    if (res.ok && !data.error) compatModels.add(model);
   }
   if (!res.ok || data.error) {
     const status = data.error?.code || res.status;
-    throw new AiError(`${model}: ${data.error?.message || res.statusText || 'gagal'}`, Number(status) || res.status);
+    throw new AiError(`${model}: ${errorText(data.error) || res.statusText || 'gagal'}`, Number(status) || res.status);
   }
   const text = String(data.choices?.[0]?.message?.content || '').trim();
   if (!text) throw new AiError(`${model}: jawaban kosong`, 502);
