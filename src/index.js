@@ -105,6 +105,12 @@ const loginLimiter = rateLimit({
   message: { error: 'Terlalu banyak percobaan login. Coba lagi dalam beberapa menit.' },
 })
 app.use('/api/auth/login', loginLimiter)
+// Ganti kata sandi: batasi percobaan menebak kata sandi lama
+app.use('/api/me/password', rateLimit({
+  windowMs: 15 * 60 * 1000, max: 10,
+  standardHeaders: true, legacyHeaders: false,
+  message: { error: 'Terlalu banyak percobaan. Coba lagi dalam beberapa menit.' },
+}))
 
 // VAPID public key untuk web push (terbuka — bukan rahasia)
 app.get('/api/push/vapid-public-key', (req, res) => {
