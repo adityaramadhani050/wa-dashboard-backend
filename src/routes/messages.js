@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { canModify, insertOwned } from './templates.js';
 import multer from 'multer';
 import { getSock, broadcast, bumpConvOutgoing } from '../baileys/connection.js';
 import { supabase } from '../db/supabase.js';
@@ -373,17 +374,13 @@ router.post('/quick-media', upload.single('file'), async (req, res) => {
 
     const { data: { publicUrl } } = supabase.storage.from('wa-media').getPublicUrl(storageFilename);
 
-    const { data, error } = await supabase
-      .from('quick_media')
-      .insert({
-        label,
-        media_url: publicUrl,
-        media_type: mediaType,
-        mimetype: file.mimetype,
-        category: category || null,
-      })
-      .select()
-      .single();
+    const { data, error } = await insertOwned('quick_media', {
+      label,
+      media_url: publicUrl,
+      media_type: mediaType,
+      mimetype: file.mimetype,
+      category: category || null,
+    }, req.user);
 
     if (error) throw error;
     res.status(201).json(data);
@@ -397,6 +394,9 @@ router.post('/quick-media', upload.single('file'), async (req, res) => {
 router.delete('/quick-media/:id', async (req, res) => {
   try {
     const { id } = req.params;
+    if (!(await canModify('quick_media', id, req.user))) {
+      return res.status(403).json({ error: 'Hanya pengunggah media atau admin yang dapat menghapusnya.' });
+    }
     const { error } = await supabase.from('quick_media').delete().eq('id', id);
     if (error) throw error;
     res.json({ success: true });

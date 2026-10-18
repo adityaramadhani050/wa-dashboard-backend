@@ -3,6 +3,23 @@ import { supabase } from '../db/supabase.js';
 
 const router = Router();
 
+// Agent hanya boleh mengubah/menghapus template buatannya sendiri; admin semua.
+// Kolom created_by opsional (migrasi) -> tanpa kolom, agent tidak bisa mengubah.
+export async function canModify(table, id, user) {
+  if (!user || user.role === 'admin') return true;
+  const { data, error } = await supabase.from(table).select('created_by').eq('id', id).maybeSingle();
+  if (error || !data) return false;
+  return data.created_by != null && String(data.created_by) === String(user.id);
+}
+
+// Insert dengan created_by; ulangi tanpa kolom itu bila belum dimigrasi.
+export async function insertOwned(table, row, user) {
+  const run = (r) => supabase.from(table).insert(r).select().single();
+  if (!user?.id || user.type === 'service') return run(row);
+  const res = await run({ ...row, created_by: user.id });
+  return res.error && /created_by/.test(res.error.message || '') ? run(row) : res;
+}
+
 // List templates
 router.get('/', async (req, res) => {
   try {
@@ -27,16 +44,12 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'title dan body wajib diisi' });
     }
 
-    const { data, error } = await supabase
-      .from('message_templates')
-      .insert({
-        title,
-        body,
-        shortcut: shortcut ? shortcut.trim().toLowerCase() : null,
-        category: category || null,
-      })
-      .select()
-      .single();
+    const { data, error } = await insertOwned('message_templates', {
+      title,
+      body,
+      shortcut: shortcut ? shortcut.trim().toLowerCase() : null,
+      category: category || null,
+    }, req.user);
 
     if (error) throw error;
     res.status(201).json(data);
@@ -107,6 +120,9 @@ router.put('/:id', async (req, res) => {
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ error: 'Tidak ada field yang diupdate' });
     }
+    if (!(await canModify('message_templates', id, req.user))) {
+      return res.status(403).json({ error: 'Hanya pembuat template atau admin yang dapat mengubahnya.' });
+    }
 
     const { data, error } = await supabase
       .from('message_templates')
@@ -128,6 +144,9 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   try {
     const { id } = req.params;
+    if (!(await canModify('message_templates', id, req.user))) {
+      return res.status(403).json({ error: 'Hanya pembuat template atau admin yang dapat menghapusnya.' });
+    }
     const { error } = await supabase.from('message_templates').delete().eq('id', id);
     if (error) throw error;
     res.json({ success: true });
