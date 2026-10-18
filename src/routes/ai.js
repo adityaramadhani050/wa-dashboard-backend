@@ -3,6 +3,21 @@ import { GoogleGenAI } from '@google/genai';
 import { supabase } from '../db/supabase.js';
 import { STEP_META, OBJECTIONS } from '../services/followup.js';
 import { buildSalesContext } from '../services/salesKnowledge.js';
+import { getSalutation } from '../services/aiKnowledge.js';
+import { humanizeText, getAiSalesConfig } from '../services/aiSales.js';
+
+// Sapaan & gaya sama dengan AI Sales: pak/bu + nama (dari Ingatan AI), tanpa
+// "kak"/"Anda", huruf kecil bila diaktifkan di pengaturan AI Sales.
+async function styleFor(conversationId) {
+  const [{ data: conv }, cfg] = await Promise.all([
+    supabase.from('conversations').select('contact:contacts (id)').eq('id', conversationId).maybeSingle(),
+    getAiSalesConfig().catch(() => ({ lowercase: true })),
+  ]);
+  const salutation = await getSalutation(conv?.contact?.id).catch(() => null);
+  const lowercase = cfg.lowercase !== false;
+  const rule = `SAPAAN: ${salutation ? `panggil customer "${salutation}" (pak/bu + nama)` : 'nama customer belum diketahui, pakai "bapak/ibu" atau tanpa sapaan'}. JANGAN PERNAH memakai "kak", "kakak", atau "Anda".${lowercase ? ' Tulis SEMUA dengan huruf kecil seperti orang chat santai.' : ''}`;
+  return { salutation, lowercase, rule };
+}
 
 const router = Router();
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
@@ -24,6 +39,7 @@ router.post('/suggest', async (req, res) => {
     if (msgError) throw msgError;
 
     const { productRef, salesStyleRef, learnSourceNote, templateRef, convTagsText } = await buildSalesContext(conversation_id);
+    const style = await styleFor(conversation_id);
 
     const history = (messages || [])
       .reverse()
@@ -69,7 +85,8 @@ Tag di atas adalah penanda status dari tim sales — kalau ada, PATUHI dan sesua
 - "Follow-Up": customer perlu di-follow up. Beri dorongan halus & relevan sesuai konteks terakhir.
 Kalau ada tag lain yang tak tercantum di sini, pakai penilaianmu sendiri.
 
-GAYA: ramah, santai, profesional khas chat WA sales Indonesia (boleh sapaan "Kak"). Jangan kaku/formal. Jangan pakai nama spesifik customer (tidak tersedia).
+GAYA: ramah, santai, profesional khas chat WA sales Indonesia. Jangan kaku/formal.
+${style.rule}
 
 PANJANG — WAJIB SINGKAT: maksimal 1-2 kalimat pendek (idealnya di bawah ~25 kata). Langsung ke inti, jangan bertele-tele. Lebih baik terlalu singkat daripada kepanjangan.
 
@@ -81,7 +98,7 @@ HUMANIZE — WAJIB, biar kedengaran seperti MANUSIA asli yang lagi ngetik WA, BU
 - Emoji secukupnya saja (0-2), jangan tiap kalimat. Jangan pakai bullet/list/penomoran — ini chat WA, tulis mengalir natural.
 - HINDARI gaya korporat/AI yang kaku: jangan buka dengan "Tentu," "Baik," "Dengan senang hati kami", "Terima kasih atas pertanyaan Anda", "Perlu kami informasikan bahwa", "Mohon maaf atas ketidaknyamanannya". Jangan terlalu sempurna/formal.
 - Jangan kedengaran seperti brosur atau jawaban call center. Tulis seperti chat personal ke satu orang.
-- Pakai "Kakak/Kak" untuk customer dan "kami/kita" untuk tim — konsisten, jangan campur "Anda".
+- Pakai "pak/bu" (+ nama bila diketahui) untuk customer dan "kami/kita" untuk tim, konsisten.
 
 BELAJAR DARI SALES ASLI — INI ACUAN PALING PENTING: berikut contoh balasan NYATA yang ditulis tim sales kami (${learnSourceNote}). Tirukan gaya bahasa, diksi, panjang kalimat, sapaan, dan cara mereka menggali/menawarkan/closing. Serap "rasa"-nya, JANGAN menyalin isinya mentah-mentah kalau tidak relevan dengan konteks:
 ${salesStyleRef || '(belum ada contoh balasan sales)'}
@@ -105,7 +122,7 @@ PENTING: Balas HANYA dengan teks saran balasan siap kirim, singkat seperti yang 
       },
     });
 
-    const suggestion = (result.text || '').trim();
+    const suggestion = humanizeText(result.text || '', style);
     res.json({ suggestion });
   } catch (err) {
     console.error('POST /ai/suggest error:', err);
@@ -148,6 +165,7 @@ router.post('/followup-draft', async (req, res) => {
     const meta = STEP_META[step];
     if (!meta) return res.status(400).json({ error: 'Tahap follow-up tidak dikenal' });
 
+    const style = await styleFor(conversation_id);
     const [history, { data: contactRow }, { data: lastObj }] = await Promise.all([
       getHistoryText(conversation_id, 40),
       supabase.from('conversations').select('contact:contacts (name)').eq('id', conversation_id).maybeSingle(),
@@ -165,13 +183,13 @@ router.post('/followup-draft', async (req, res) => {
       model: MODEL,
       contents:
         `Tahap follow-up: ${meta.label} — tujuan: ${meta.goal}\n${objectionText}\n` +
-        `Nama customer: ${name || '(tidak diketahui)'}\n\nRiwayat chat:\n${history || '(kosong)'}\n\n` +
+        `Nama di WhatsApp: ${name || '(tidak diketahui)'} (belum tentu nama asli)\n\nRiwayat chat:\n${history || '(kosong)'}\n\n` +
         'Tulis SATU pesan WhatsApp follow-up untuk dikirim sales ke customer ini.',
       config: {
         systemInstruction:
           'Kamu sales PLTS (panel surya) yang ramah dan profesional. Tulis pesan follow-up WhatsApp berbahasa Indonesia yang ' +
           'singkat (2-4 kalimat), personal, merujuk penawaran/diskusi terakhir di riwayat chat, sesuai tujuan tahap. ' +
-          'Sapa dengan "Kak" (+ nama bila ada). Jangan mengarang harga/spesifikasi yang tidak ada di riwayat. ' +
+          `${style.rule} Jangan mengarang harga/spesifikasi yang tidak ada di riwayat. ` +
           'Untuk tahap VALUES, tawarkan informasi tambahan yang relevan dengan keberatan customer. ' +
           'Jangan memaksa. Jawab HANYA isi pesannya.',
         maxOutputTokens: 400,
@@ -180,7 +198,7 @@ router.post('/followup-draft', async (req, res) => {
       },
     });
 
-    res.json({ draft: (result.text || '').trim() });
+    res.json({ draft: humanizeText(result.text || '', style) });
   } catch (err) {
     handleAiError(err, res, 'POST /ai/followup-draft');
   }
