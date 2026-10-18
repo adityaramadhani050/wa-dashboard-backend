@@ -6,6 +6,7 @@ import { runMediaTtlAll } from '../services/mediaTtl.js';
 import { parseRegionalSettings, invalidateRegionalSettingsCache } from '../services/regionalBot.js';
 import { getAiSalesConfig, saveAiSalesConfig } from '../services/aiSales.js';
 import { aiEnabled, getAiModels, saveAiModels } from '../services/llm.js';
+import { getAiTeamConfig, saveAiTeamConfig } from '../services/aiTeam.js';
 
 const router = Router();
 
@@ -58,6 +59,17 @@ router.put('/ai-models', requireAdmin, async (req, res) => {
     console.error('PUT /settings/ai-models error:', err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// Tanya Tim (AI Sales -> PIC divisi lewat WA) — admin.
+router.get('/ai-team', requireAdmin, async (req, res) => {
+  try { res.json(await getAiTeamConfig()); }
+  catch (err) { console.error('GET /settings/ai-team error:', err); res.status(500).json({ error: err.message }); }
+});
+
+router.put('/ai-team', requireAdmin, async (req, res) => {
+  try { res.json(await saveAiTeamConfig(req.body || {})); }
+  catch (err) { console.error('PUT /settings/ai-team error:', err); res.status(500).json({ error: err.message }); }
 });
 
 // Backfill hapus media lama (admin) — bebaskan storage sekaligus.

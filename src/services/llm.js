@@ -23,9 +23,11 @@ export const DEFAULT_AI_MODELS = {
     ai_followup: CHAT_MODELS,
     suggest_reply: CHAT_MODELS,
     followup_draft: CHAT_MODELS,
+    ai_team_reply: CHAT_MODELS,
     memory_summary: LIGHT_MODELS,
     skill_keywords: LIGHT_MODELS,
     regional_city: LIGHT_MODELS,
+    team_parse: LIGHT_MODELS,
   },
   privacy: false, // true = hanya penyedia yang tidak menyimpan/melatih data prompt
 };
@@ -157,7 +159,7 @@ async function callOnce(model, { system, prompt, json, maxTokens, temperature, t
 export async function generate(feature, { system = '', prompt, json = false, maxTokens = 400, temperature = 0.7, topP, models } = {}) {
   if (!aiEnabled()) throw new AiError('OPENROUTER_API_KEY belum diset di server', 500);
   const cfg = await getAiModels();
-  const f = cfg.features[feature] || DEFAULT_AI_MODELS.features.ai_sales_reply;
+  const f = cfg.features[feature] || cfg.features.ai_sales_reply;
   const list = (models?.length ? models : [f.model, ...f.fallbacks]).filter(Boolean);
   let lastErr = null;
   let limited = false;

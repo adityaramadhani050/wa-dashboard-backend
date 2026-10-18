@@ -8,12 +8,13 @@ import {
 } from '../services/aiKnowledge.js';
 import { usageSummary, AI_FEATURES } from '../services/aiUsage.js';
 import { generate, listModels, keyStatus, aiEnabled } from '../services/llm.js';
+import { listTeamRequests, closeTeamRequest, checkPicNumbers, getAiTeamConfig } from '../services/aiTeam.js';
 
 const router = Router();
 
 const fail = (res, label, err) => {
   console.error(`${label} error:`, err);
-  const missing = /ai_skills|ai_lessons|ai_customer_memory|ai_usage_log/.test(err?.message || '') && /exist|schema cache/i.test(err?.message || '');
+  const missing = /ai_skills|ai_lessons|ai_customer_memory|ai_usage_log|ai_team_requests/.test(err?.message || '') && /exist|schema cache/i.test(err?.message || '');
   res.status(500).json({ error: missing ? 'Tabel pengetahuan AI belum dibuat. Jalankan SQL migrasi di Supabase.' : err.message });
 };
 
@@ -207,6 +208,26 @@ router.post('/models/test', requireAdmin, async (req, res) => {
   } catch (err) {
     res.json({ ok: false, model, error: err.message, status: err.status || null, ms: Date.now() - started });
   }
+});
+
+// ── Tanya Tim ─────────────────────────────────────────────────────────────
+// Riwayat per chat boleh dilihat semua user; daftar semua chat khusus admin.
+router.get('/team-requests', async (req, res) => {
+  try {
+    const conversationId = req.query.conversation_id || null;
+    if (!conversationId && req.user?.role !== 'admin') return res.status(403).json({ error: 'Khusus admin' });
+    res.json(await listTeamRequests({ conversationId, limit: Math.min(100, parseInt(req.query.limit, 10) || 30) }));
+  } catch (err) { fail(res, 'GET /ai-sales/team-requests', err); }
+});
+
+router.post('/team-requests/:id/close', requireAdmin, async (req, res) => {
+  try { res.json(await closeTeamRequest(req.params.id)); }
+  catch (err) { fail(res, 'POST /ai-sales/team-requests/:id/close', err); }
+});
+
+router.post('/team-check', requireAdmin, async (req, res) => {
+  try { res.json(await checkPicNumbers(await getAiTeamConfig())); }
+  catch (err) { res.status(502).json({ error: err.message }); }
 });
 
 export default router;

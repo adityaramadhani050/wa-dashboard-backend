@@ -6,6 +6,8 @@ import { supabase } from '../db/supabase.js';
 export const AI_FEATURES = {
   ai_sales_reply: 'AI Sales — balas customer',
   ai_followup: 'AI Sales — follow-up otomatis',
+  ai_team_reply: 'AI Sales — teruskan jawaban tim',
+  team_parse: 'Tanya Tim — membaca jawaban tim',
   suggest_reply: 'Saran balasan (agent)',
   followup_draft: 'Draf follow-up (agent)',
   memory_summary: 'Ringkasan Ingatan AI',

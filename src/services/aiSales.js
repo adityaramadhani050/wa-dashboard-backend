@@ -18,6 +18,7 @@ import { buildKnowledge, refreshMemories, getSalutation, saveSalutation, normali
 import { STEP_META, getFollowupConfig, completeTask, applyAiOutcome } from './followup.js';
 import { getWorkHours } from '../routes/stats.js';
 import { generate, aiEnabled } from './llm.js';
+import { getAiTeamConfig, teamPromptRules, teamContextFor, createTeamRequest, submitCustomerAnswer } from './aiTeam.js';
 import { sendToAgents } from '../push/fcm.js';
 import { sendWebPushToAgents } from '../push/webpush.js';
 
@@ -165,13 +166,7 @@ async function processConversation(conversationId, { force = false } = {}) {
 
     // Ada manusia (admin/agent) yang membalas setelah balasan AI terakhir & masih
     // baru -> admin sedang menangani, AI tidak ikut campur. (Butuh kolom sent_by_ai.)
-    if (!force) {
-      let lastAi = -1;
-      msgs.forEach((m, i) => { if (m.sent_by_ai) lastAi = i; });
-      const humanRecent = msgs.slice(lastAi + 1).some((m) => m.from_me && !m.sent_by_bot && m.sent_by_ai === false
-        && Date.now() - new Date(m.timestamp).getTime() < HUMAN_ACTIVE_MS);
-      if (humanRecent) return;
-    }
+    if (!force && humanActive(msgs)) return;
 
     const dayKey = `${conversationId}|${wibDate()}`;
     if ((dailyCount.get(dayKey) || 0) >= MAX_REPLIES_PER_DAY) {
@@ -226,6 +221,55 @@ async function processConversation(conversationId, { force = false } = {}) {
   }
 }
 
+// Manusia (admin/agent) membalas setelah balasan AI terakhir & masih baru?
+function humanActive(msgs) {
+  let lastAi = -1;
+  msgs.forEach((m, i) => { if (m.sent_by_ai) lastAi = i; });
+  return msgs.slice(lastAi + 1).some((m) => m.from_me && !m.sent_by_bot && m.sent_by_ai === false
+    && Date.now() - new Date(m.timestamp).getTime() < HUMAN_ACTIVE_MS);
+}
+
+// Tugas AI di luar alur balasan biasa (mis. meneruskan jawaban Tanya Tim).
+// task: instruksi untuk AI; opts.fixedMessages: kirim teks ini tanpa AI.
+// Hasil { sent } — false bila chat bukan milik AI / admin sedang aktif.
+export async function runAiTask(conversationId, task, { fixedMessages = null, feature = 'ai_team_reply' } = {}) {
+  for (let i = 0; processing.has(conversationId) && i < 30; i++) await sleep(2000);
+  if (processing.has(conversationId)) return { sent: false, reason: 'busy' };
+  processing.add(conversationId);
+  try {
+    const cfg = await getAiSalesConfig();
+    if (!cfg.enabled || !cfg.agent_id) return { sent: false, reason: 'disabled' };
+    const { data: conv } = await supabase.from('conversations')
+      .select('id, assigned_to, status, wa_jid, contact:contacts (id, name, phone)')
+      .eq('id', conversationId).maybeSingle();
+    if (!conv || String(conv.assigned_to) !== String(cfg.agent_id)) return { sent: false, reason: 'not_ai' };
+    const msgs = await fetchRecentMessages(conversationId);
+    if (humanActive(msgs)) return { sent: false, reason: 'human_active' };
+    const jid = conv.wa_jid || (conv.contact?.phone ? `${String(conv.contact.phone).split('@')[0]}@s.whatsapp.net` : null);
+    if (!jid) return { sent: false, reason: 'no_jid' };
+    const { data: agent } = await supabase.from('agents').select('name').eq('id', cfg.agent_id).maybeSingle();
+    const persona = cfg.persona_name || agent?.name || 'Sales';
+
+    let plan = null;
+    if (fixedMessages?.length) plan = { messages: fixedMessages };
+    else {
+      if (!aiEnabled()) return { sent: false, reason: 'no_key' };
+      plan = await generateReply({
+        conversationId, contactId: conv.contact?.id, waName: conv.contact?.name, msgs, cfg, persona, feature,
+        task: `${task}\nBila ada pesan customer yang belum dibalas, tanggapi sekalian. Pada keluaran ini "skip" harus false.`,
+      });
+    }
+    if (!plan?.messages?.length) return { sent: false, reason: 'empty' };
+    const unread = [];
+    for (let i = msgs.length - 1; i >= 0 && !msgs[i].from_me; i--) if (msgs[i].wa_message_id) unread.push(msgs[i].wa_message_id);
+    await sendAiBubbles(conversationId, jid, plan.messages, { readIds: unread });
+    if (!fixedMessages) await applyActions(conv, plan, persona);
+    return { sent: true };
+  } finally {
+    processing.delete(conversationId);
+  }
+}
+
 // ── Otak AI ───────────────────────────────────────────────────────────────
 
 const MEDIA_LABEL = { image: 'gambar', video: 'video', audio: 'pesan suara', document: 'dokumen', sticker: 'stiker', location: 'lokasi', contact: 'kontak' };
@@ -242,7 +286,7 @@ function historyText(msgs, persona) {
 // Prompt TETAP (sama untuk semua chat selama pengaturan tidak berubah) -> diletakkan
 // di depan agar penyedia model bisa memakai prompt cache (lebih murah). Data yang
 // berubah per chat ada di buildChatContext() dan dikirim di bagian akhir.
-export function buildSystemPrompt({ persona, style, instructions, ctx, lowercase = true, company = 'Renus' }) {
+export function buildSystemPrompt({ persona, style, instructions, ctx, lowercase = true, company = 'Renus', teamRules = '' }) {
   const tone = style === 'sopan'
     ? 'sopan & profesional tapi tetap hangat, hindari singkatan alay'
     : 'santai, ramah, khas chat WA sales Indonesia (singkatan WA wajar seperti "yg", "utk", "kalo")';
@@ -292,6 +336,7 @@ URUTAN PATOKAN (bila ada yang bertentangan, ikuti yang lebih atas):
 2. KATALOG (satu-satunya sumber harga/spek) & PELAJARAN dari koreksi admin.
 3. INGATAN tentang customer.
 4. SKILL / PLAYBOOK TAMBAHAN: referensi untuk memperkaya pengetahuan & teknik sales (cara menggali, menjawab keberatan, edukasi). Pakai isinya bila relevan, tapi jangan sampai mengubah gaya, panjang balasan, atau aturan di atas.
+${teamRules ? `\n${teamRules}\n` : ''}
 KELUARAN: JSON saja, tanpa teks lain:
 {"messages": ["bubble 1", "bubble 2 (opsional)"],
  "skip": false (true HANYA bila pesan customer tidak perlu dibalas, messages kosong),
@@ -299,31 +344,37 @@ KELUARAN: JSON saja, tanpa teks lain:
  "survey": {"ready": true/false (true HANYA bila customer setuju survei & sudah memberi alamat + usulan waktu), "nama": "", "alamat": "", "jadwal": "", "catatan": ""},
  "notify_admin": "" (isi ringkasan singkat bila ada hal yang perlu ditangani admin, selain itu kosong),
  "panggilan": "" (isi "pak <nama>"/"bu <nama>" bila customer sudah menyebut namanya di percakapan, selain itu kosong),
- "followup_outcome": "", "objection_category": "" (isi HANYA bila ada CATATAN FOLLOW-UP pada pesan: "considering" masih pertimbangan, "objection" ada keberatan + kategori harga|spek|kebutuhan|timing|approval|kompetitor, "later" minta dihubungi nanti, "interested" tertarik lanjut/survei, "lost" tidak jadi)}`;
+ "followup_outcome": "", "objection_category": "" (isi HANYA bila ada CATATAN FOLLOW-UP pada pesan: "considering" masih pertimbangan, "objection" ada keberatan + kategori harga|spek|kebutuhan|timing|approval|kompetitor, "later" minta dihubungi nanti, "interested" tertarik lanjut/survei, "lost" tidak jadi)${teamRules ? `,
+ "ask_team": null atau {"division": "gudang|teknis", "topic": "ringkas, mis. baterai 10 kwh", "question": "pertanyaan customer ringkas", "team_message": "{panggilan}, ..."},
+ "team_answer": null atau {"id": "...", "team_message": "jawaban customer untuk tim"}` : ''}}`;
 }
 
 // Data per chat (dikirim setelah prompt tetap).
-export function buildChatContext({ ctx, knowledge = '', fuTask = null, waName = '', salutation = null }) {
+export function buildChatContext({ ctx, knowledge = '', fuTask = null, waName = '', salutation = null, team = '' }) {
   return [
     `KATALOG:\n${ctx.productRef || '(katalog belum diisi)'}`,
     `TAG CHAT: ${ctx.convTagsText}`,
     `DATA CUSTOMER: nama di WhatsApp: ${waName || '-'} · panggilan tersimpan: ${salutation || '(belum diketahui)'}`,
     knowledge || '',
+    team || '',
     fuTask ? `CATATAN FOLLOW-UP: pesan terakhir kita sebelum customer membalas adalah follow-up tahap ${fuTask.label} (${fuTask.goal}). Isi "followup_outcome".` : '',
   ].filter(Boolean).join('\n\n');
 }
 
-async function generateReply({ conversationId, contactId, waName = '', msgs, cfg, persona, fuTask = null, task = '' }) {
+async function generateReply({ conversationId, contactId, waName = '', msgs, cfg, persona, fuTask = null, task = '', feature = null }) {
   const salutation = await getSalutation(contactId).catch(() => null);
   // Skill & produk relevan dipilih dari pesan customer terbaru
   const chatText = msgs.filter((m) => !m.from_me).slice(-4).map((m) => m.body || '').join('\n');
   const ctx = await buildSalesContext(conversationId, { chatText: `${chatText}\n${task}` });
   let knowledge = { text: '', used: null };
   try { knowledge = await buildKnowledge({ contactId, chatText: task ? `${chatText}\n${task}` : chatText }); } catch (e) { console.warn('[AISales] pengetahuan gagal dimuat:', e?.message || e); }
+  const teamCfg = await getAiTeamConfig().catch(() => null);
+  const teamRules = teamPromptRules(teamCfg);
+  const team = teamRules ? await teamContextFor(conversationId, teamCfg).catch(() => '') : '';
   if (knowledge.used?.skills?.length) console.log(`[AISales] conv=${conversationId} skill: ${knowledge.used.skills.map((s) => s.title).join(', ')}`);
-  const result = await generate(task ? 'ai_followup' : 'ai_sales_reply', {
-    system: buildSystemPrompt({ persona, style: cfg.style, instructions: cfg.instructions, ctx, lowercase: cfg.lowercase, company: cfg.company }),
-    prompt: `${buildChatContext({ ctx, knowledge: knowledge.text, fuTask, waName, salutation })}\n\nRIWAYAT CHAT (15 pesan terakhir, terbaru di bawah; konteks lebih lama ada di INGATAN):\n${historyText(msgs.slice(-HISTORY_LIMIT), persona)}\n\n${task || 'Balas pesan customer yang terakhir.'}`,
+  const result = await generate(feature || (task ? 'ai_followup' : 'ai_sales_reply'), {
+    system: buildSystemPrompt({ persona, style: cfg.style, instructions: cfg.instructions, ctx, lowercase: cfg.lowercase, company: cfg.company, teamRules }),
+    prompt: `${buildChatContext({ ctx, knowledge: knowledge.text, fuTask, waName, salutation, team })}\n\nRIWAYAT CHAT (15 pesan terakhir, terbaru di bawah; konteks lebih lama ada di INGATAN):\n${historyText(msgs.slice(-HISTORY_LIMIT), persona)}\n\n${task || 'Balas pesan customer yang terakhir.'}`,
     json: true,
     maxTokens: 600,
     temperature: 0.8,
@@ -359,6 +410,16 @@ export function humanizeText(text, { salutation = null, lowercase = false } = {}
   return t;
 }
 
+function parseAskTeam(a) {
+  if (!a || typeof a !== 'object') return null;
+  const division = String(a.division || '').toLowerCase().trim();
+  if (!['gudang', 'teknis'].includes(division)) return null;
+  const topic = String(a.topic || '').trim().slice(0, 120);
+  const question = String(a.question || '').trim().slice(0, 500);
+  if (!topic && !question) return null;
+  return { division, topic: topic || question.slice(0, 80), question, team_message: String(a.team_message || '').trim().slice(0, 1000) };
+}
+
 export function parsePlan(text, { salutation = null, lowercase = false } = {}) {
   let raw = String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```$/, '').trim();
   let obj;
@@ -388,6 +449,9 @@ export function parsePlan(text, { salutation = null, lowercase = false } = {}) {
     panggilan,
     followup_outcome: ['considering', 'objection', 'later', 'interested', 'lost'].includes(fo) ? fo : null,
     objection_category: String(obj.objection_category || '').trim() || null,
+    ask_team: parseAskTeam(obj.ask_team),
+    team_answer: obj.team_answer && obj.team_answer.id && String(obj.team_answer.team_message || '').trim()
+      ? { id: String(obj.team_answer.id).trim(), team_message: String(obj.team_answer.team_message).trim().slice(0, 600) } : null,
   };
 }
 
@@ -435,15 +499,24 @@ async function sendAiText(conversationId, jid, text) {
   return res.data;
 }
 
-async function notifyAdmins(title, body, conversationId) {
-  const { data: admins } = await supabase.from('agents').select('id').eq('role', 'admin');
-  const ids = (admins || []).map((a) => a.id);
-  if (!ids.length) return;
+export async function notifyAgents(ids, title, body, conversationId) {
+  if (!ids?.length) return;
   const data = { url: `/chat/${conversationId}`, tag: `ai-sales-${conversationId}` };
   await Promise.allSettled([
     sendToAgents(ids, { title, body, data }),
     sendWebPushToAgents(ids, { title, body, data }),
   ]);
+}
+
+export async function notifyAdmins(title, body, conversationId) {
+  const { data: admins } = await supabase.from('agents').select('id').eq('role', 'admin');
+  await notifyAgents((admins || []).map((a) => a.id), title, body, conversationId);
+}
+
+// Catatan kontak atas nama akun AI Sales.
+export async function addContactNote(contactId, body) {
+  const cfg = await getAiSalesConfig();
+  await addNote(contactId, cfg.agent_id, body);
 }
 
 async function addNote(contactId, agentId, body) {
@@ -473,6 +546,13 @@ async function applyActions(conv, plan, persona) {
     if (plan.notify_admin) {
       await addNote(conv.contact?.id, cfg.agent_id, `[${persona} · AI] Perlu dibantu admin: ${plan.notify_admin}`);
       await notifyAdmins('AI Sales butuh bantuan', `${who}: ${plan.notify_admin}`, conv.id);
+    }
+    if (plan.team_answer) await submitCustomerAnswer(plan.team_answer, conv);
+    if (plan.ask_team) {
+      await createTeamRequest({
+        conv, division: plan.ask_team.division, topic: plan.ask_team.topic,
+        question: plan.ask_team.question, teamMessage: plan.ask_team.team_message,
+      });
     }
   } catch (e) {
     console.warn(`[AISales] aksi conv=${conv.id} gagal:`, e?.message || e);

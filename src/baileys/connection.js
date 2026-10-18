@@ -16,6 +16,7 @@ import { sendWebPushToAgents, sendWebPushToAll, isWebPushEnabled } from '../push
 import { routeIncoming, isBotMessageId } from '../services/regionalBot.js'
 import { pauseOnCustomerReply } from '../services/followup.js'
 import { onIncomingForAi } from '../services/aiSales.js'
+import { isTeamPhone, isTeamWaId, handleTeamMessage } from '../services/aiTeam.js'
 import { compressImage, makeThumbnail } from '../utils/media.js'
 import QRCode from 'qrcode'
 import fs from 'fs/promises'
@@ -582,6 +583,21 @@ async function persistMessage(msg, { isLive }) {
 
   const isGroup = jid.endsWith('@g.us')
   const waMessageId = msg.key.id
+
+  // Nomor PIC divisi (Tanya Tim) = internal: tidak disimpan sebagai chat customer.
+  // Dikenali dari nomornya, atau dari reply ke pesan kita (jid PIC bisa @lid).
+  if (!isGroup) {
+    const teamPhone = resolvePhone(jid)
+    const quotedId = getContextInfo(msg.message)?.stanzaId || null
+    if (isTeamPhone(teamPhone) || (!fromMe && isTeamWaId(quotedId))) {
+      if (!fromMe) {
+        try {
+          handleTeamMessage({ jid, phone: teamPhone, body: extractBody(msg.message), quotedId, waMessageId, timestamp: msg.messageTimestamp, isLive })
+        } catch (e) { console.warn('[AITeam] gagal menerima pesan tim:', e?.message || e) }
+      }
+      return
+    }
+  }
 
   // Pesan keluar milik bot regional sudah disimpan oleh bot sendiri (bertanda sent_by_bot)
   if (fromMe && isBotMessageId(waMessageId)) return
