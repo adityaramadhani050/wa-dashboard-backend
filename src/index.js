@@ -53,6 +53,9 @@ process.on('uncaughtException', (err) => {
 
 const PORT = process.env.PORT || 3000
 const app = express()
+// Railway meneruskan request lewat 1 proxy: pakai IP asli user (X-Forwarded-For)
+// agar rate limit login dihitung per user, bukan semua user berbagi 1 IP proxy.
+app.set('trust proxy', 1)
 const httpServer = createServer(app)
 
 const io = new Server(httpServer, {
