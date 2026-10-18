@@ -4,14 +4,14 @@
 // dengan reply/quote; AI membaca jawabannya lalu meneruskan ke customer.
 //
 // - Pengaturan: app_settings 'ai_team' (divisi, topik, PIC utama + cadangan,
-//   batas waktu). Nomor PIC = nomor internal: tidak masuk Inbox/Analytics.
+//   batas waktu). Chat dengan nomor PIC tetap tersimpan (nomor ini juga dipakai
+//   notifikasi ERP) tapi tidak di-auto-assign & tidak dibalas AI.
 // - Data: tabel ai_team_requests (SQL migrasi). Bila belum ada, fitur nonaktif.
 // - Ke customer: tidak pernah menyebut supplier/procurement/gudang kosong;
 //   barang inden dibingkai sebagai pesanan langsung dari pabrik.
 import { randomBytes } from 'crypto';
 import { supabase } from '../db/supabase.js';
 import { getSock } from '../baileys/connection.js';
-import { markBotMessageId } from './regionalBot.js';
 import { generate, parseJsonLoose } from './llm.js';
 import { getSalutation } from './aiKnowledge.js';
 import { getWorkHours, workMinutes } from '../routes/stats.js';
@@ -205,8 +205,7 @@ async function sendToPic(phone, text, { quote = null } = {}) {
       await sock.sendPresenceUpdate?.('paused', jid);
     } catch { /* opsional */ }
     const id = '3EB0' + randomBytes(9).toString('hex').toUpperCase();
-    markBotMessageId(id);
-    teamWaIds.add(id);
+    teamWaIds.add(id); // pesan ini tersimpan di chat PIC lewat event WA biasa
     const opts = { messageId: id };
     if (quote?.id && i === 0) {
       opts.quoted = { key: { remoteJid: quote.jid || jid, id: quote.id, fromMe: !!quote.fromMe }, message: { conversation: quote.text || '' } };
@@ -375,7 +374,7 @@ export async function parseTeamReply(text, list, quotedIdx) {
   const out = await generate('team_parse', {
     system: `Kamu membantu sales membaca balasan WhatsApp dari rekan kerja internal (tim gudang / procurement / teknis) atas pertanyaan sales. Balas HANYA JSON:
 {"match": nomor pertanyaan yang dijawab (1..n) atau null bila tidak bisa dipastikan,
- "kind": "answer" (jawaban/informasi, termasuk "tidak ada"/"kosong"/"harus pesan") | "question" (tim balik bertanya / butuh info tambahan dari customer) | "ack" (hanya konfirmasi sedang dicek, mis. "ok bentar", "siap dicek") | "other",
+ "kind": "answer" (jawaban/informasi, termasuk "tidak ada"/"kosong"/"harus pesan") | "question" (tim balik bertanya / butuh info tambahan dari customer) | "ack" (hanya konfirmasi sedang dicek, mis. "ok bentar", "siap dicek") | "other" (TIDAK berkaitan dengan pertanyaan di daftar, mis. menanggapi notifikasi sistem/ERP, PO, pengiriman barang lain, obrolan lain — bila ragu pilih "other" dan match null),
  "stock": khusus pertanyaan [gudang] dengan kind "answer": "available" (semua tersedia) | "partial" (sebagian) | "empty" (kosong); selain itu null,
  "answer": ringkasan jawaban atau pertanyaan tim yang akurat & lengkap (angka, tipe, jumlah, waktu), jangan menambah info,
  "missing": bila partial/empty: barang yang kosong/kurang, selain itu "",
@@ -403,6 +402,8 @@ async function processTeamBatch(phone, msgs) {
   try { parsed = await parseTeamReply(text, list, byQuote ? list.indexOf(byQuote) + 1 : null); }
   catch (e) { console.warn('[AITeam] AI gagal membaca jawaban tim:', e?.message || e); }
 
+  // Tidak berkaitan (mis. menanggapi notifikasi ERP) & bukan reply ke pertanyaan kita -> abaikan
+  if (parsed.kind === 'other' && !byQuote) return;
   let req = byQuote || (parsed.match && list[parsed.match - 1]) || null;
   const waiting = list.filter((r) => r.status !== 'answered');
   if (!req && waiting.length === 1) req = waiting[0];

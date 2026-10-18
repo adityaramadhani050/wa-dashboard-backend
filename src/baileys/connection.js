@@ -584,18 +584,23 @@ async function persistMessage(msg, { isLive }) {
   const isGroup = jid.endsWith('@g.us')
   const waMessageId = msg.key.id
 
-  // Nomor PIC divisi (Tanya Tim) = internal: tidak disimpan sebagai chat customer.
-  // Dikenali dari nomornya, atau dari reply ke pesan kita (jid PIC bisa @lid).
+  // Nomor PIC divisi (Tanya Tim). Nomor ini juga dipakai notifikasi lain (mis.
+  // ERP), jadi chat-nya tetap disimpan seperti biasa (termasuk pertanyaan &
+  // jawaban Tanya Tim) — hanya tidak di-auto-assign & tidak dibalas AI.
+  // Pesan PIC yang me-reply pertanyaan Tanya Tim, atau tanpa reply, ikut dibaca
+  // Tanya Tim; reply ke pesan lain (mis. notifikasi ERP) diabaikan Tanya Tim.
+  let internalChat = false
   if (!isGroup) {
     const teamPhone = resolvePhone(jid)
     const quotedId = getContextInfo(msg.message)?.stanzaId || null
-    if (isTeamPhone(teamPhone) || (!fromMe && isTeamWaId(quotedId))) {
-      if (!fromMe) {
+    const replyToTeamQuestion = !fromMe && isTeamWaId(quotedId)
+    if (isTeamPhone(teamPhone) || replyToTeamQuestion) {
+      internalChat = true
+      if (!fromMe && (replyToTeamQuestion || !quotedId)) {
         try {
           handleTeamMessage({ jid, phone: teamPhone, body: extractBody(msg.message), quotedId, waMessageId, timestamp: msg.messageTimestamp, isLive })
         } catch (e) { console.warn('[AITeam] gagal menerima pesan tim:', e?.message || e) }
       }
-      return
     }
   }
 
@@ -708,7 +713,8 @@ async function persistMessage(msg, { isLive }) {
 
   if (isLive) {
     incrementDailyStats().catch(() => {})
-    if (!fromMe) {
+    // Chat internal (nomor PIC): tanpa routing/auto-assign/AI
+    if (!fromMe && !internalChat) {
       // Customer membalas -> jeda urutan follow-up (lanjut saat chat Resolved lagi)
       pauseOnCustomerReply(conversationId).catch(() => {})
       // Chat bertag Deal / Non-Client dianggap SELESAI -> tidak boleh Aktif.
