@@ -20,9 +20,9 @@ const router = Router();
 //   kolom resolved_at, waktu tag dari conversation_tags.created_at + riwayat
 //   conversation_tag_events (fallback updated_at bila belum dimigrasi).
 // - Konversi      : Lead -> Prospek -> Deal.
-// - Respons       : tiap pesan customer yang menunggu balasan (sesi) dalam
-//                   periode -> waktu sampai agent membalas, dihitung dalam jam
-//                   kerja bila Jam Kerja aktif. Pesan bot tidak dihitung balasan.
+// - Respons       : per chat, waktu dari pesan customer pertama dalam periode
+//                   sampai balasan agent pertama, dihitung dalam jam kerja bila
+//                   Jam Kerja aktif. Pesan bot tidak dihitung balasan.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const TZ = 7 * 3600 * 1000;
@@ -352,22 +352,23 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
       if (inRange(at)) days[wibKey(at)].resolved_chats++;
     }
 
-    // Respons agent
+    // Respons agent: per CHAT, balasan pertama atas pesan customer pertama
+    // (sesi tunggu pertama) yang dimulai dalam periode.
     if (!nc) {
       const key = c.assigned_to || 'unassigned';
-      for (const s of waitSessions(convMsgs)) {
-        if (!inRange(s.start)) continue;
+      const s = waitSessions(convMsgs).find((x) => inRange(x.start));
+      if (s) {
         const ka = (kpiAgents[key] = kpiAgents[key] || { total: 0, met: 0, unreplied: 0 });
         if (s.end == null) {
-          // Hanya chat yang masih aktif = benar-benar menunggu balasan
+          // Belum dibalas sama sekali; hanya dihitung bila chat masih aktif
           if (isActiveNow) { unreplied++; ka.unreplied++; if (row) row.unreplied++; }
-          continue;
+        } else {
+          const mins = workMinutes(s.from, s.end, wh);
+          const ok = mins <= KPI_MINUTES;
+          kpiTotal++; ka.total++;
+          if (ok) { kpiMet++; ka.met++; }
+          if (row) { row.replies++; if (ok) row.kpi_met++; row._times.push(mins); }
         }
-        const mins = workMinutes(s.from, s.end, wh);
-        const ok = mins <= KPI_MINUTES;
-        kpiTotal++; ka.total++;
-        if (ok) { kpiMet++; ka.met++; }
-        if (row) { row.replies++; if (ok) row.kpi_met++; row._times.push(mins); }
       }
     }
 
@@ -466,7 +467,7 @@ router.get('/daily', handle('daily', (a, req) => {
 // Performa per agent dalam periode
 router.get('/agents', handle('agents', (a) => a.agents));
 
-// KPI respons: % pesan customer yang dibalas agent <= 5 menit
+// KPI respons: % chat yang balasan pertamanya <= 5 menit
 router.get('/response-kpi', handle('response-kpi', (a) => a.kpi));
 
 // Funnel: Total Lead -> Prospek -> Deal (+ Fail)
