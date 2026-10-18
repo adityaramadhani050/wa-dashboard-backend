@@ -27,7 +27,7 @@ const router = Router();
 
 const TZ = 7 * 3600 * 1000;
 const DAY = 86400000;
-const KPI_MINUTES = 5;
+export const KPI_MINUTES = 5;
 const REGIONS = ['barat', 'timur'];
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -81,7 +81,7 @@ function parseRange(q) {
 }
 
 // Jam kerja aktif -> { days|null, start, end } (menit sejak 00:00 WIB); nonaktif -> null.
-async function getWorkHours() {
+export async function getWorkHours() {
   try {
     const { data } = await supabase.from('app_settings').select('value').eq('key', 'work_hours').maybeSingle();
     const v = data?.value ? JSON.parse(data.value) : null;

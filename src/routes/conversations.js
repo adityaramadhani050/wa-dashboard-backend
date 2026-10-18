@@ -4,6 +4,7 @@ import { getSock, broadcast, bumpConvOutgoing } from '../baileys/connection.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { setRegionManually } from '../services/regionalBot.js';
 import { onTagsChanged as onFollowupTagsChanged } from '../services/followup.js';
+import { waitSessions, workMinutes, getWorkHours, KPI_MINUTES } from './stats.js';
 
 const router = Router();
 
@@ -393,6 +394,43 @@ router.delete('/:id/tags/:tagId', async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error(`DELETE /conversations/${req.params.id}/tags/${req.params.tagId} error:`, err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Rata-rata waktu respons agent di satu chat (semua balasan, jam kerja bila aktif).
+router.get('/:id/response-stats', async (req, res) => {
+  try {
+    const run = (cols) => {
+      const all = [];
+      const page = async (from) => {
+        const { data, error } = await supabase.from('messages').select(cols)
+          .eq('conversation_id', req.params.id)
+          .order('timestamp', { ascending: true }).order('id', { ascending: true })
+          .range(from, from + 999);
+        if (error) return { error };
+        all.push(...(data || []));
+        return data && data.length === 1000 ? page(from + 1000) : { data: all };
+      };
+      return page(0);
+    };
+    let r = await run('from_me, timestamp, sent_by_bot');
+    if (r.error) r = await run('from_me, timestamp');
+    if (r.error) throw r.error;
+    const wh = await getWorkHours();
+    const sessions = waitSessions(r.data);
+    const times = sessions.filter((s) => s.end != null).map((s) => workMinutes(s.from, s.end, wh));
+    const last = sessions[sessions.length - 1];
+    res.json({
+      avg: times.length ? Math.round(times.reduce((a, b) => a + b, 0) / times.length) : null,
+      replies: times.length,
+      met: times.filter((t) => t <= KPI_MINUTES).length,
+      kpiMinutes: KPI_MINUTES,
+      workHours: !!wh,
+      waiting: !!(last && last.end == null),
+    });
+  } catch (err) {
+    console.error(`GET /conversations/${req.params.id}/response-stats error:`, err);
     res.status(500).json({ error: err.message });
   }
 });
