@@ -118,7 +118,7 @@ export async function buildKnowledge({ contactId, chatText }) {
     parts.push(`INGATAN TENTANG CUSTOMER INI (dari percakapan sebelumnya; pakai, jangan tanya ulang yang sudah diketahui):\n${memory.summary}`);
   }
   if (chosen.length) {
-    parts.push(`SKILL / PLAYBOOK TIM (pedoman resmi — ikuti bila relevan dengan pesan customer):\n${
+    parts.push(`SKILL / PLAYBOOK TAMBAHAN (referensi pengetahuan & teknik sales — pakai bila relevan; aturan utama, katalog & instruksi admin tetap didahulukan):\n${
       chosen.map((x) => `### ${x.s.title}\n${x.s.content}`).join('\n\n')}`);
   }
   if (lessonList.length) {
