@@ -98,6 +98,12 @@ async function setConv(conversationId, patch) {
 // menyimpan ulang pesan keluar milik bot (sudah disimpan di sini).
 const botMsgIds = new Set();
 export function isBotMessageId(id) { return !!id && botMsgIds.has(id); }
+// Pengirim otomatis lain (mis. AI Sales) mendaftarkan ID pesannya di sini juga.
+export function markBotMessageId(id) {
+  if (!id) return;
+  botMsgIds.add(id);
+  setTimeout(() => botMsgIds.delete(id), 5 * 60 * 1000);
+}
 
 async function sendBot(conversationId, jid, text) {
   const sock = getSock();

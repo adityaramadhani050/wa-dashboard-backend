@@ -4,8 +4,41 @@ import { requireAdmin } from '../middleware/auth.js';
 import { invalidateAutoAssignCache, distributeUnassigned } from '../services/autoAssign.js';
 import { runMediaTtlAll } from '../services/mediaTtl.js';
 import { parseRegionalSettings, invalidateRegionalSettingsCache } from '../services/regionalBot.js';
+import { getAiSalesConfig, saveAiSalesConfig } from '../services/aiSales.js';
 
 const router = Router();
+
+// AI Sales Agent. Semua user boleh tahu akun mana yang AI (untuk badge);
+// detail pengaturan hanya untuk admin.
+router.get('/ai-sales', async (req, res) => {
+  try {
+    const cfg = await getAiSalesConfig();
+    if (req.user?.role !== 'admin') return res.json({ enabled: cfg.enabled, agent_id: cfg.agent_id });
+    res.json({ ...cfg, gemini: !!process.env.GEMINI_API_KEY });
+  } catch (err) {
+    console.error('GET /settings/ai-sales error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.put('/ai-sales', requireAdmin, async (req, res) => {
+  try {
+    const body = req.body || {};
+    if (body.agent_id) {
+      const { data: agent } = await supabase.from('agents').select('id, role').eq('id', body.agent_id).maybeSingle();
+      if (!agent) return res.status(400).json({ error: 'Akun agent tidak ditemukan.' });
+      if (agent.role === 'admin') return res.status(400).json({ error: 'Pilih akun dengan role Agent, bukan Admin.' });
+    }
+    if (body.enabled && !body.agent_id && !(await getAiSalesConfig()).agent_id) {
+      return res.status(400).json({ error: 'Pilih akun agent untuk AI Sales terlebih dahulu.' });
+    }
+    const saved = await saveAiSalesConfig(body);
+    res.json({ ...saved, gemini: !!process.env.GEMINI_API_KEY });
+  } catch (err) {
+    console.error('PUT /settings/ai-sales error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // Backfill hapus media lama (admin) — bebaskan storage sekaligus.
 router.post('/cleanup-media', requireAdmin, async (req, res) => {

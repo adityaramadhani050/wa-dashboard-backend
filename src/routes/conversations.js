@@ -5,6 +5,7 @@ import { requireAdmin } from '../middleware/auth.js';
 import { setRegionManually } from '../services/regionalBot.js';
 import { onTagsChanged as onFollowupTagsChanged } from '../services/followup.js';
 import { waitSessions, workMinutes, getWorkHours, KPI_MINUTES } from './stats.js';
+import { getAiSalesConfig, scheduleAiReply } from '../services/aiSales.js';
 
 const router = Router();
 
@@ -183,6 +184,11 @@ router.post('/:id/assign', async (req, res) => {
     if (error && /assigned_at/.test(error.message || '')) ({ data, error } = await run(base)); // kolom belum ada
 
     if (error) throw error;
+
+    // Di-assign ke AI Sales -> langsung balas pesan customer yang menunggu
+    getAiSalesConfig().then((cfg) => {
+      if (cfg.enabled && String(cfg.agent_id) === String(agent_id)) scheduleAiReply(id, 3000, { force: true });
+    }).catch(() => {});
 
     // Broadcast assignment supaya list chat semua dashboard update realtime
     if (data?.agents) {

@@ -37,6 +37,7 @@ import { startMediaTtlJob } from './services/mediaTtl.js'
 import { startBroadcastWorker } from './services/broadcastWorker.js'
 import { startRegionalBotJob } from './services/regionalBot.js'
 import { startFollowupJob } from './services/followup.js'
+import { startAiSalesJob } from './services/aiSales.js'
 import { subscriber, redisAvailable } from './db/redis.js'
 
 // Cegah proses mati karena error async internal Baileys yang tidak bisa kita
@@ -195,5 +196,6 @@ httpServer.listen(PORT, '0.0.0.0', async () => {
   startBroadcastWorker()
   startRegionalBotJob()
   startFollowupJob()
+  startAiSalesJob()
   await connectToWhatsApp()
 })

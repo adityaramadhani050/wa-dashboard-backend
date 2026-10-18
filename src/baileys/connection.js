@@ -15,6 +15,7 @@ import { sendToAgents, sendToAll, isPushEnabled } from '../push/fcm.js'
 import { sendWebPushToAgents, sendWebPushToAll, isWebPushEnabled } from '../push/webpush.js'
 import { routeIncoming, isBotMessageId } from '../services/regionalBot.js'
 import { pauseOnCustomerReply } from '../services/followup.js'
+import { onIncomingForAi } from '../services/aiSales.js'
 import { compressImage, makeThumbnail } from '../utils/media.js'
 import QRCode from 'qrcode'
 import fs from 'fs/promises'
@@ -722,6 +723,9 @@ async function persistMessage(msg, { isLive }) {
         }).catch((e) => {
           console.warn('[Routing] gagal:', e?.message || e)
           pushNewMessage(payload).catch(() => {})
+        }).then(() => {
+          // Chat dipegang AI Sales -> balas otomatis (setelah routing/assign selesai)
+          if (!isGroup) onIncomingForAi(conversationId).catch(() => {})
         })
       }
     }
