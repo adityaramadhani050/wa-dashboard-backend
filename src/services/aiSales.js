@@ -15,6 +15,7 @@ import { supabase } from '../db/supabase.js';
 import { getSock, broadcast, bumpConvOutgoing } from '../baileys/connection.js';
 import { markBotMessageId } from './regionalBot.js';
 import { buildSalesContext } from './salesKnowledge.js';
+import { buildKnowledge, refreshMemories } from './aiKnowledge.js';
 import { sendToAgents } from '../push/fcm.js';
 import { sendWebPushToAgents } from '../push/webpush.js';
 
@@ -147,7 +148,7 @@ async function processConversation(conversationId, { force = false } = {}) {
 
     const { data: agent } = await supabase.from('agents').select('name').eq('id', cfg.agent_id).maybeSingle();
     const persona = cfg.persona_name || agent?.name || 'Sales';
-    const plan = await generateReply({ conversationId, msgs, cfg, persona });
+    const plan = await generateReply({ conversationId, contactId: conv.contact?.id, msgs, cfg, persona });
     if (!plan?.reply) return;
 
     // Pesan baru masuk selagi AI berpikir -> jadwalkan ulang agar ikut terjawab
@@ -188,7 +189,7 @@ function historyText(msgs, persona) {
   }).join('\n');
 }
 
-export function buildSystemPrompt({ persona, style, instructions, ctx }) {
+export function buildSystemPrompt({ persona, style, instructions, ctx, knowledge = '' }) {
   const tone = style === 'sopan'
     ? 'sopan & profesional tapi tetap hangat (boleh "Kak", hindari singkatan alay)'
     : 'santai, ramah, khas chat WA sales Indonesia (boleh "Kak", singkatan WA wajar seperti "yg", "utk", "kalo")';
@@ -222,7 +223,7 @@ GAYA: ${tone}. Pakai "Kak" untuk customer, "kami" untuk tim. Maksimal 2-3 kalima
 
 CONTOH GAYA SALES ASLI KAMI (${ctx.learnSourceNote}) — tiru rasa bahasanya, jangan salin mentah:
 ${ctx.salesStyleRef || '(belum ada contoh)'}
-${instructions ? `\nINSTRUKSI TAMBAHAN DARI ADMIN (wajib dipatuhi):\n${instructions}\n` : ''}
+${instructions ? `\nINSTRUKSI TAMBAHAN DARI ADMIN (wajib dipatuhi):\n${instructions}\n` : ''}${knowledge ? `\n${knowledge}\n` : ''}
 KELUARAN: JSON saja, tanpa teks lain:
 {"reply": "balasan WA siap kirim",
  "prospek": true/false  (true bila balasan ini/sebelumnya sudah memberi penawaran harga/paket, atau customer jelas tertarik membeli),
@@ -230,13 +231,18 @@ KELUARAN: JSON saja, tanpa teks lain:
  "notify_admin": "" (isi ringkasan singkat bila ada hal yang perlu ditangani admin, selain itu kosong)}`;
 }
 
-async function generateReply({ conversationId, msgs, cfg, persona }) {
+async function generateReply({ conversationId, contactId, msgs, cfg, persona }) {
   const ctx = await buildSalesContext(conversationId);
+  // Skill relevan dipilih dari pesan customer terbaru (+ balasan terakhir untuk konteks)
+  const chatText = msgs.filter((m) => !m.from_me).slice(-4).map((m) => m.body || '').join('\n');
+  let knowledge = { text: '', used: null };
+  try { knowledge = await buildKnowledge({ contactId, chatText }); } catch (e) { console.warn('[AISales] pengetahuan gagal dimuat:', e?.message || e); }
+  if (knowledge.used?.skills?.length) console.log(`[AISales] conv=${conversationId} skill: ${knowledge.used.skills.map((s) => s.title).join(', ')}`);
   const result = await client().models.generateContent({
     model: MODEL,
     contents: `Riwayat chat (terbaru di bawah):\n${historyText(msgs.slice(-30), persona)}\n\nBalas pesan customer yang terakhir.`,
     config: {
-      systemInstruction: buildSystemPrompt({ persona, style: cfg.style, instructions: cfg.instructions, ctx }),
+      systemInstruction: buildSystemPrompt({ persona, style: cfg.style, instructions: cfg.instructions, ctx, knowledge: knowledge.text }),
       responseMimeType: 'application/json',
       maxOutputTokens: 600,
       temperature: 0.8,
@@ -362,5 +368,10 @@ async function sweep() {
 export function startAiSalesJob(intervalMs = 60 * 1000) {
   setTimeout(() => sweep().catch(() => {}), 30 * 1000);
   setInterval(() => sweep().catch(() => {}), intervalMs);
+  // Memori customer: ringkas chat AI yang sudah sepi, tiap 5 menit
+  setInterval(async () => {
+    const cfg = await getAiSalesConfig().catch(() => null);
+    if (cfg?.enabled && cfg.agent_id) refreshMemories(cfg.agent_id).catch(() => {});
+  }, 5 * 60 * 1000);
   console.log('[AISales] job aktif');
 }

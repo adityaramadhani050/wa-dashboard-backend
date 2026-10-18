@@ -26,6 +26,7 @@ import aiRouter from './routes/ai.js'
 import productsRouter from './routes/products.js'
 import devicesRouter from './routes/devices.js'
 import settingsRouter from './routes/settings.js'
+import aiSalesRouter from './routes/aiSales.js'
 import meRouter from './routes/me.js'
 import broadcastRouter from './routes/broadcast.js'
 import followupRouter from './routes/followup.js'
@@ -147,6 +148,7 @@ app.use('/api/ai', requireAuth, aiRouter)
 app.use('/api/products', requireAuth, productsRouter)
 app.use('/api/devices', requireAuth, devicesRouter)
 app.use('/api/settings', requireAuth, settingsRouter)
+app.use('/api/ai-sales', requireAuth, aiSalesRouter)
 app.use('/api/me', requireAuth, meRouter)
 app.use('/api/broadcast', requireAdmin, broadcastRouter)
 app.use('/api/followup', requireAuth, followupRouter)
