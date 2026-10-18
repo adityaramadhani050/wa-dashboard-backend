@@ -523,7 +523,7 @@ async function processFollowupTask(task, cfg, persona) {
     const fuCfg = await getFollowupConfig().catch(() => ({ templates: {} }));
     const sal = await getSalutation(conv.contact?.id).catch(() => null);
     const tpl = String(fuCfg.templates?.[task.step] || '')
-      .replace(/\bkak(ak)?\s*\{\{\s*nama\s*\}\}/gi, sal || 'bapak/ibu').replace(/\{\{\s*nama\s*\}\}/gi, sal || 'bapak/ibu');
+      .replace(/(\bkak(ak)?|\b(bapak|pak)\s*\/\s*(ibu|bu))\s*\{\{\s*nama\s*\}\}/gi, sal || 'bapak/ibu').replace(/\{\{\s*nama\s*\}\}/gi, sal || 'bapak/ibu');
     const instruction = `TUGAS SEKARANG: customer belum membalas sejak pesan terakhir. Kirim pesan FOLLOW-UP tahap ${meta.label || task.step}: ${meta.goal || 'sapa & tindak lanjuti diskusi terakhir'}.
 Rujuk diskusi terakhir secara personal (produk/kebutuhan yang dibahas), singkat, tidak memaksa, jangan menyebut kata "follow up". Jangan mengulang salam pembuka panjang.
 ${tpl ? `Acuan isi dari tim (sesuaikan dengan konteks, jangan disalin mentah): ${tpl}` : ''}

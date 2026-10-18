@@ -48,12 +48,12 @@ export const OBJECTIONS = {
 
 // ── Pengaturan (template pesan + peringatan keterlambatan) ─────────────────
 export const DEFAULT_TEMPLATES = {
-  confirm: 'Halo Kak {{nama}}, kami ingin memastikan penawaran yang kami kirim sudah diterima dengan baik. Apakah ada yang ingin didiskusikan lebih lanjut? 🙏',
-  feedback: 'Halo Kak {{nama}}, bagaimana pendapat Kakak tentang penawaran kami? Adakah bagian yang perlu kami jelaskan lebih detail?',
-  objection: 'Halo Kak {{nama}}, boleh kami tahu apa yang masih menjadi pertimbangan Kakak, misalnya dari sisi harga, spesifikasi, atau waktu pemasangan? Kami siap bantu carikan solusinya.',
-  values: 'Halo Kak {{nama}}, sebagai bahan pertimbangan, kami siapkan [simulasi penghematan / perbandingan opsi / studi kasus] yang sesuai dengan kebutuhan Kakak. Boleh kami kirimkan?',
-  reactivation: 'Halo Kak {{nama}}, apa kabar? Kami ingin menanyakan apakah rencana pemasangannya masih berjalan, berubah, atau ditunda dulu? Kami siap membantu kapan pun Kakak siap.',
-  nurture: 'Halo Kak {{nama}}, semoga sehat selalu. Kami ingin menyapa kembali, apakah ada rencana yang bisa kami bantu dalam waktu dekat?',
+  confirm: 'Bapak/Ibu {{nama}}, sudah sempat lihat estimasi/penawaran yang kami kirim? Bagian mana yang mau saya jelaskan, hitungan hematnya atau sistem baterainya?',
+  feedback: 'Bapak/Ibu {{nama}}, minggu lalu tim kami baru memasang PLTS di area yang tidak jauh, kondisinya mirip dengan tempat Bapak/Ibu. Kalau berkenan saya jelaskan singkat lewat telepon 10 menit?',
+  objection: 'Bapak/Ibu {{nama}}, boleh tahu apa yang masih ditimbang? Dari sisi biaya, hasil hematnya, atau waktunya? Biar saya bantu carikan opsi yang paling pas.',
+  values: 'Bapak/Ibu {{nama}}, info: pengajuan PLTS atap ke PLN dibuka Januari dan Juli. Kalau targetnya terpasang sebelum jendela berikutnya, survei gratis idealnya dijadwalkan dari sekarang. Mau saya pegang jadwalnya?',
+  reactivation: 'Bapak/Ibu {{nama}}, saya tidak ingin mengganggu 🙏 Apakah rencananya saya tutup dulu, atau kita jadwalkan ulang bulan depan?',
+  nurture: 'Bapak/Ibu {{nama}}, semoga sehat selalu. Sekadar menyapa kembali, apakah rencana PLTS-nya sudah ada yang bisa kami bantu dalam waktu dekat?',
 };
 // Peringatan ke admin: tugas terlambat lebih dari `late_days` hari kerja.
 export const DEFAULT_ALERT = { enabled: true, late_days: 2 };

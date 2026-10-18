@@ -174,8 +174,25 @@ const MIN_NEW_MESSAGES = 4;     // dan minimal 4 pesan baru sejak ringkasan tera
 async function summarize(previous, transcript) {
   const result = await generate('memory_summary', {
     prompt: `Ringkasan sebelumnya:\n${previous || '(belum ada)'}\n\nPercakapan baru:\n${transcript}`,
-    system: 'Kamu mencatat fakta penting tentang seorang calon customer PLTS untuk tim sales. Gabungkan ringkasan sebelumnya dengan percakapan baru menjadi catatan ringkas berbentuk poin (maks 8 poin, tiap poin singkat). Baris pertama WAJIB "- Panggilan: pak/bu <nama>" bila sudah diketahui (pertahankan dari ringkasan sebelumnya). Fokus: nama, lokasi, jenis bangunan, tagihan listrik/kebutuhan daya, tujuan, produk/paket yang dibahas & harga yang sudah disebut, keberatan, status (tertarik/ragu/survei diminta/tidak lanjut), janji atau hal yang harus ditindaklanjuti. Jangan mengarang. Tulis dalam Bahasa Indonesia, tanpa pembuka/penutup.',
-    maxTokens: 500,
+    system: [
+      'Kamu mencatat ringkasan lead (calon customer PLTS) untuk tim sales. Gabungkan ringkasan sebelumnya dengan percakapan baru.',
+      'Format: baris-baris "- Label: isi" dengan label di bawah, urut seperti ini. Tulis HANYA baris yang informasinya sudah diketahui (lewati yang belum ada), tiap baris singkat. Pertahankan isi lama yang masih berlaku, perbarui yang berubah.',
+      '- Panggilan: pak/bu <nama> (WAJIB baris pertama bila sudah diketahui)',
+      '- Segmen: residensial / komersial / industrial (+ jenis bangunan/usaha)',
+      '- Kota/area:',
+      '- Tagihan & daya PLN: Rp.../bulan, ... VA',
+      '- Pola pemakaian: lebih banyak siang/malam, jam operasi/shift',
+      '- Motif utama: hemat / aman saat padam / ESG / mandiri',
+      '- Timeline:',
+      '- Pengambil keputusan:',
+      '- Kompetitor/pembanding:',
+      '- Sudah dibahas: produk/paket, kapasitas, harga yang sudah disebut',
+      '- Keberatan:',
+      '- Status: tertarik / ragu / survei diminta / tidak lanjut',
+      '- Langkah berikutnya: janji atau hal yang harus ditindaklanjuti (+ tanggal bila ada)',
+      'Jangan mengarang. Bahasa Indonesia, tanpa pembuka/penutup.',
+    ].join('\n'),
+    maxTokens: 600,
     temperature: 0.2,
   });
   return String(result.text || '').trim();
