@@ -152,6 +152,29 @@ export async function saveMemory(contactId, summary, lastMessageAt = null) {
   if (error) throw error;
 }
 
+// Panggilan customer (mis. "pak budi" / "bu sari") disimpan sebagai baris
+// "- Panggilan: ..." di memori customer.
+const SAL_RE = /^\s*-?\s*panggilan\s*:\s*(.+)$/im;
+export function normalizeSalutation(v) {
+  let s = String(v || '').toLowerCase().replace(/[^a-z\s.'-]/g, ' ').replace(/\s+/g, ' ').trim();
+  s = s.replace(/^bapak\b/, 'pak').replace(/^ibu\b/, 'bu');
+  if (!/^(pak|bu)(\s|$)/.test(s)) return null;
+  return s.split(' ').slice(0, 3).join(' ').slice(0, 30);
+}
+export async function getSalutation(contactId) {
+  if (!contactId) return null;
+  const mem = await getMemory(contactId).catch(() => null);
+  const m = mem?.summary?.match(SAL_RE);
+  return m ? normalizeSalutation(m[1]) : null;
+}
+export async function saveSalutation(contactId, salutation) {
+  const sal = normalizeSalutation(salutation);
+  if (!contactId || !sal) return;
+  const mem = await getMemory(contactId).catch(() => null);
+  const rest = String(mem?.summary || '').split('\n').filter((l) => l.trim() && !SAL_RE.test(l));
+  await saveMemory(contactId, [`- Panggilan: ${sal}`, ...rest].join('\n'));
+}
+
 const IDLE_MS = 10 * 60 * 1000; // ringkas setelah chat sepi 10 menit
 
 async function summarize(previous, transcript) {
@@ -159,7 +182,7 @@ async function summarize(previous, transcript) {
     model: MODEL,
     contents: `Ringkasan sebelumnya:\n${previous || '(belum ada)'}\n\nPercakapan baru:\n${transcript}`,
     config: {
-      systemInstruction: 'Kamu mencatat fakta penting tentang seorang calon customer PLTS untuk tim sales. Gabungkan ringkasan sebelumnya dengan percakapan baru menjadi catatan ringkas berbentuk poin (maks 8 poin, tiap poin singkat). Fokus: nama/panggilan, lokasi, jenis bangunan, tagihan listrik/kebutuhan daya, tujuan, produk/paket yang dibahas & harga yang sudah disebut, keberatan, status (tertarik/ragu/survei diminta/tidak lanjut), janji atau hal yang harus ditindaklanjuti. Jangan mengarang. Tulis dalam Bahasa Indonesia, tanpa pembuka/penutup.',
+      systemInstruction: 'Kamu mencatat fakta penting tentang seorang calon customer PLTS untuk tim sales. Gabungkan ringkasan sebelumnya dengan percakapan baru menjadi catatan ringkas berbentuk poin (maks 8 poin, tiap poin singkat). Baris pertama WAJIB "- Panggilan: pak/bu <nama>" bila sudah diketahui (pertahankan dari ringkasan sebelumnya). Fokus: nama, lokasi, jenis bangunan, tagihan listrik/kebutuhan daya, tujuan, produk/paket yang dibahas & harga yang sudah disebut, keberatan, status (tertarik/ragu/survei diminta/tidak lanjut), janji atau hal yang harus ditindaklanjuti. Jangan mengarang. Tulis dalam Bahasa Indonesia, tanpa pembuka/penutup.',
       maxOutputTokens: 500,
       temperature: 0.2,
       thinkingConfig: { thinkingBudget: 0 },

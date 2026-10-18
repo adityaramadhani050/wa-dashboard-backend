@@ -15,7 +15,7 @@ import { supabase } from '../db/supabase.js';
 import { getSock, broadcast, bumpConvOutgoing } from '../baileys/connection.js';
 import { markBotMessageId } from './regionalBot.js';
 import { buildSalesContext } from './salesKnowledge.js';
-import { buildKnowledge, refreshMemories } from './aiKnowledge.js';
+import { buildKnowledge, refreshMemories, getSalutation, saveSalutation, normalizeSalutation } from './aiKnowledge.js';
 import { STEP_META, getFollowupConfig, completeTask, applyAiOutcome } from './followup.js';
 import { getWorkHours } from '../routes/stats.js';
 import { sendToAgents } from '../push/fcm.js';
@@ -34,6 +34,7 @@ export const DEFAULT_AI_SALES = {
   instructions: '',          // aturan/info tambahan dari admin
   reply_delay_sec: 10,       // tunggu pesan beruntun sebelum membalas
   followup_enabled: false,   // AI mengirim tugas follow-up chat miliknya otomatis
+  lowercase: true,           // semua huruf kecil agar terlihat natural
 };
 
 export function parseAiSales(raw) {
@@ -48,6 +49,7 @@ export function parseAiSales(raw) {
     instructions: String(v.instructions || '').slice(0, 3000),
     reply_delay_sec: Number.isNaN(delay) ? DEFAULT_AI_SALES.reply_delay_sec : Math.min(120, Math.max(3, delay)),
     followup_enabled: !!v.followup_enabled,
+    lowercase: v.lowercase === undefined ? true : !!v.lowercase,
   };
 }
 
@@ -157,7 +159,7 @@ async function processConversation(conversationId, { force = false } = {}) {
     const persona = cfg.persona_name || agent?.name || 'Sales';
     // Follow-up AI terakhir yang kini dibalas customer -> AI ikut menilai hasilnya
     const fuTask = await pendingAiFollowupOutcome(conversationId, cfg.agent_id, last.timestamp);
-    const plan = await generateReply({ conversationId, contactId: conv.contact?.id, msgs, cfg, persona, fuTask });
+    const plan = await generateReply({ conversationId, contactId: conv.contact?.id, waName: conv.contact?.name, msgs, cfg, persona, fuTask });
     if (!plan) return;
     if (plan.followup_outcome && fuTask) {
       await applyAiOutcome(fuTask.id, plan.followup_outcome, plan.objection_category).catch(() => {});
@@ -211,10 +213,10 @@ function historyText(msgs, persona) {
   }).join('\n');
 }
 
-export function buildSystemPrompt({ persona, style, instructions, ctx, knowledge = '', fuTask = null }) {
+export function buildSystemPrompt({ persona, style, instructions, ctx, knowledge = '', fuTask = null, waName = '', salutation = null, lowercase = true }) {
   const tone = style === 'sopan'
-    ? 'sopan & profesional tapi tetap hangat (boleh "Kak", hindari singkatan alay)'
-    : 'santai, ramah, khas chat WA sales Indonesia (boleh "Kak", singkatan WA wajar seperti "yg", "utk", "kalo")';
+    ? 'sopan & profesional tapi tetap hangat, hindari singkatan alay'
+    : 'santai, ramah, khas chat WA sales Indonesia (singkatan WA wajar seperti "yg", "utk", "kalo")';
   return `Kamu adalah ${persona}, sales PLTS (panel surya) RenusPro yang sedang membalas chat WhatsApp customer secara langsung. Kamu sales manusia sungguhan dari sudut pandang customer: tulis seperti orang yang mengetik di HP.
 
 TUJUAN: bawa customer bertahap dari kenal -> paham kebutuhan & solusi -> SETUJU SURVEI LOKASI GRATIS. Batas wewenangmu: mengumpulkan data & usulan jadwal survei. Konfirmasi jadwal survei & Deal dilakukan admin — jangan pernah menjanjikan jadwal pasti atau menyatakan deal.
@@ -241,14 +243,20 @@ DI LUAR KEMAMPUAN (komplain, garansi/servis unit terpasang, minta ditelepon, per
 Bila customer bertanya apakah kamu bot/AI: jangan berbohong — jawab santai bahwa kamu dibantu sistem tim RenusPro, lalu lanjutkan membantu.
 Media yang tidak bisa kamu lihat (gambar/dokumen/pesan suara): minta customer menjelaskan singkat lewat teks.
 
-GAYA: ${tone}. Pakai "Kak" untuk customer, "kami" untuk tim, jangan pernah "Anda". Jangan sebut dirimu AI/asisten virtual.
+SAPAAN CUSTOMER:
+- Nama di WhatsApp: ${waName || '-'} (belum tentu nama asli, jangan dipakai menebak).
+- Panggilan tersimpan: ${salutation || '(belum diketahui)'}.
+- Pakai "pak"/"bu" + nama (mis. "pak budi", "bu sari") bila panggilan sudah diketahui. Sebelum tahu, pakai "bapak/ibu" atau tanpa sapaan. JANGAN PERNAH memakai "kak", "kakak", atau "Anda".
+- Bila panggilan belum diketahui, tanyakan nama secara natural di awal percakapan (balasan pertama atau kedua), mis. "maaf dengan bapak/ibu siapa ya?", sambil tetap menjawab pertanyaannya. Cukup sekali, jangan diulang bila tidak dijawab. Tentukan pak/bu dari jawaban customer (nama, cara menyebut diri, konteks); bila ragu tetap "bapak/ibu".
+
+GAYA: ${tone}. Pakai "kami" untuk tim. Jangan sebut dirimu AI/asisten virtual.${lowercase ? ' Tulis SEMUA dengan huruf kecil (termasuk awal kalimat & nama), seperti orang chat santai.' : ''}
 TULIS SEPERTI MANUSIA NGETIK WA (penting, customer tidak boleh merasa ini bot):
 - Pecah jadi 1-3 bubble pendek seperti orang chat beruntun (mis. jawaban di bubble 1, pertanyaan di bubble 2). Sering cukup 1 bubble. Tiap bubble 1-2 kalimat.
 - Jangan selalu diakhiri pertanyaan; kadang cukup menjawab/menanggapi.
 - Jangan pakai tanda "—" atau ";" atau bullet/list/bold. Tanda seru maksimal satu. Emoji 0-1 per balasan, tidak di setiap balasan.
-- Jangan buka dengan "Tentu", "Baik", "Halo kak!" berulang, "Terima kasih atas pertanyaannya", "Dengan senang hati". Jangan tutup dengan "Semoga membantu", "Jangan ragu untuk…", "Ada lagi yang bisa dibantu?".
+- Jangan buka dengan "Tentu", "Baik", "Halo!" berulang, "Terima kasih atas pertanyaannya", "Dengan senang hati". Jangan tutup dengan "Semoga membantu", "Jangan ragu untuk…", "Ada lagi yang bisa dibantu?".
 - Jangan mengulang/merangkum ucapan customer. Variasikan kata, jangan berpola sama di tiap balasan. Boleh huruf kecil di awal & singkatan wajar.
-- Pesan penutup/basa-basi dari customer ("ok", "sip", "makasih", "siap", jempol, stiker) setelah obrolan selesai: balas sangat singkat (mis. "sama2 kak 🙏") atau tidak usah dibalas (skip=true).
+- Pesan penutup/basa-basi dari customer ("ok", "sip", "makasih", "siap", jempol, stiker) setelah obrolan selesai: balas sangat singkat (mis. "sama2 pak 🙏") atau tidak usah dibalas (skip=true).
 
 CONTOH GAYA SALES ASLI KAMI (${ctx.learnSourceNote}) — tiru rasa bahasanya, jangan salin mentah:
 ${ctx.salesStyleRef || '(belum ada contoh)'}
@@ -259,11 +267,13 @@ KELUARAN: JSON saja, tanpa teks lain:
  "skip": false (true HANYA bila pesan customer tidak perlu dibalas, messages kosong),
  "prospek": true/false  (true bila balasan ini/sebelumnya sudah memberi penawaran harga/paket, atau customer jelas tertarik membeli),
  "survey": {"ready": true/false (true HANYA bila customer setuju survei & sudah memberi alamat + usulan waktu), "nama": "", "alamat": "", "jadwal": "", "catatan": ""},
- "notify_admin": "" (isi ringkasan singkat bila ada hal yang perlu ditangani admin, selain itu kosong)${fuTask ? `,
+ "notify_admin": "" (isi ringkasan singkat bila ada hal yang perlu ditangani admin, selain itu kosong),
+ "panggilan": "" (isi "pak <nama>"/"bu <nama>" bila customer sudah menyebut namanya di percakapan, selain itu kosong)${fuTask ? `,
  "followup_outcome": "", "objection_category": ""` : ''}}`;
 }
 
-async function generateReply({ conversationId, contactId, msgs, cfg, persona, fuTask = null, task = '' }) {
+async function generateReply({ conversationId, contactId, waName = '', msgs, cfg, persona, fuTask = null, task = '' }) {
+  const salutation = await getSalutation(contactId).catch(() => null);
   const ctx = await buildSalesContext(conversationId);
   // Skill relevan dipilih dari pesan customer terbaru (+ balasan terakhir untuk konteks)
   const chatText = msgs.filter((m) => !m.from_me).slice(-4).map((m) => m.body || '').join('\n');
@@ -274,35 +284,45 @@ async function generateReply({ conversationId, contactId, msgs, cfg, persona, fu
     model: MODEL,
     contents: `Riwayat chat (terbaru di bawah):\n${historyText(msgs.slice(-30), persona)}\n\n${task || 'Balas pesan customer yang terakhir.'}`,
     config: {
-      systemInstruction: buildSystemPrompt({ persona, style: cfg.style, instructions: cfg.instructions, ctx, knowledge: knowledge.text, fuTask }),
+      systemInstruction: buildSystemPrompt({ persona, style: cfg.style, instructions: cfg.instructions, ctx, knowledge: knowledge.text, fuTask, waName, salutation, lowercase: cfg.lowercase }),
       responseMimeType: 'application/json',
       maxOutputTokens: 600,
       temperature: 0.8,
       thinkingConfig: { thinkingBudget: 0 },
     },
   });
-  return parsePlan(result.text);
+  const plan = parsePlan(result.text, { salutation, lowercase: cfg.lowercase });
+  // Customer baru menyebut namanya -> simpan panggilannya untuk chat berikutnya
+  if (plan?.panggilan && plan.panggilan !== salutation) {
+    saveSalutation(contactId, plan.panggilan).catch(() => {});
+  }
+  return plan;
 }
 
 // Saringan ciri khas tulisan AI sebelum dikirim.
-export function humanizeText(text) {
+// opts.salutation: panggilan customer (mis. "pak budi"); opts.lowercase: huruf kecil semua.
+export function humanizeText(text, { salutation = null, lowercase = false } = {}) {
   let t = String(text || '').trim();
+  const short = salutation ? salutation.split(' ')[0] : '';
   t = t.replace(/^["'“”]+|["'“”]+$/g, '');                       // kutip pembungkus
   t = t.replace(/\*\*(.+?)\*\*/g, '$1').replace(/^\s*[-•*]\s+/gm, '').replace(/^#+\s*/gm, ''); // markdown
   t = t.replace(/\s*[—–]\s*/g, ', ');                               // em/en dash
   t = t.replace(/\s*;\s*/g, ', ');
-  t = t.replace(/\bAnda\b/g, 'Kakak').replace(/\banda\b/g, 'kakak');
+  t = t.replace(/^(tentu( saja)?|baik(lah)?|dengan senang hati)(,? (ya )?(kak|kakak|pak|bu|bapak|ibu)( \w+)?)?\s*[,!.]\s*/i, '');
+  t = t.replace(/\b(anda)\b/gi, short === 'pak' ? 'bapak' : short === 'bu' ? 'ibu' : 'bapak/ibu');
+  // Tidak memakai "kak": ganti dengan pak/bu bila diketahui, selain itu dihapus
+  t = t.replace(/\b(kakak|kak|kk)\b/gi, short);
   t = t.replace(/(^|[.!?]\s+)(semoga (informasi(nya)? ini )?membantu|jangan ragu (untuk|buat) [^.!?]*|ada lagi yang bisa (saya|kami|aku) bantu[^.!?]*|terima kasih atas pertanyaan(nya)?[^.!?]*)[.!?]?/gi, '$1');
-  t = t.replace(/^(tentu( saja)?|baik(lah)?|dengan senang hati)(,? (ya )?(kak|kakak))?\s*[,!.]\s*/i, '');
   t = t.replace(/!{2,}/g, '!');
   let ex = 0;
   t = t.replace(/!/g, () => (++ex > 1 ? '.' : '!'));             // tanda seru maks 1
   t = t.replace(/\s*,\s*([.!?])/g, '$1').replace(/,\s*,/g, ',').replace(/[ \t]{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
-  t = t.replace(/^[,.\s]+/, '');
+  t = t.replace(/[ \t]+([,.!?])/g, '$1').replace(/[ \t]{2,}/g, ' ').replace(/^[,.\s]+/, '').trim();
+  if (lowercase) t = t.toLowerCase();
   return t;
 }
 
-export function parsePlan(text) {
+export function parsePlan(text, { salutation = null, lowercase = false } = {}) {
   let raw = String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```$/, '').trim();
   let obj;
   try { obj = JSON.parse(raw); } catch {
@@ -311,7 +331,9 @@ export function parsePlan(text) {
   }
   if (!obj || typeof obj !== 'object') return null;
   let list = Array.isArray(obj.messages) ? obj.messages : (typeof obj.reply === 'string' ? [obj.reply] : []);
-  const messages = list.map((m) => humanizeText(String(m || '').slice(0, 1000))).filter(Boolean).slice(0, 3);
+  const panggilan = normalizeSalutation(obj.panggilan);
+  const opts = { salutation: panggilan || salutation, lowercase };
+  const messages = list.map((m) => humanizeText(String(m || '').slice(0, 1000), opts)).filter(Boolean).slice(0, 3);
   const skip = !!obj.skip && !messages.length;
   if (!messages.length && !skip) return null;
   const s = obj.survey || {};
@@ -326,6 +348,7 @@ export function parsePlan(text) {
       jadwal: String(s.jadwal || '').slice(0, 120), catatan: String(s.catatan || '').slice(0, 300),
     } : null,
     notify_admin: String(obj.notify_admin || '').trim().slice(0, 500),
+    panggilan,
     followup_outcome: ['considering', 'objection', 'later', 'interested', 'lost'].includes(fo) ? fo : null,
     objection_category: String(obj.objection_category || '').trim() || null,
   };
@@ -465,13 +488,14 @@ async function processFollowupTask(task, cfg, persona) {
 
     const meta = STEP_META[task.step] || {};
     const fuCfg = await getFollowupConfig().catch(() => ({ templates: {} }));
-    const nama = (conv.contact?.name && conv.contact.name !== conv.contact.phone) ? conv.contact.name.split(' ')[0] : '';
-    const tpl = String(fuCfg.templates?.[task.step] || '').replace(/\{\{\s*nama\s*\}\}/gi, nama || 'Kak');
+    const sal = await getSalutation(conv.contact?.id).catch(() => null);
+    const tpl = String(fuCfg.templates?.[task.step] || '')
+      .replace(/\bkak(ak)?\s*\{\{\s*nama\s*\}\}/gi, sal || 'bapak/ibu').replace(/\{\{\s*nama\s*\}\}/gi, sal || 'bapak/ibu');
     const instruction = `TUGAS SEKARANG: customer belum membalas sejak pesan terakhir. Kirim pesan FOLLOW-UP tahap ${meta.label || task.step}: ${meta.goal || 'sapa & tindak lanjuti diskusi terakhir'}.
 Rujuk diskusi terakhir secara personal (produk/kebutuhan yang dibahas), singkat, tidak memaksa, jangan menyebut kata "follow up". Jangan mengulang salam pembuka panjang.
 ${tpl ? `Acuan isi dari tim (sesuaikan dengan konteks, jangan disalin mentah): ${tpl}` : ''}
 Pada keluaran ini "skip" harus false dan "prospek"/"survey" false.`;
-    const plan = await generateReply({ conversationId: task.conversation_id, contactId: conv.contact?.id, msgs, cfg, persona, task: instruction });
+    const plan = await generateReply({ conversationId: task.conversation_id, contactId: conv.contact?.id, waName: conv.contact?.name, msgs, cfg, persona, task: instruction });
     if (!plan?.messages?.length) return false;
 
     const jid = conv.wa_jid || (conv.contact?.phone ? `${String(conv.contact.phone).split('@')[0]}@s.whatsapp.net` : null);
