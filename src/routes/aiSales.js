@@ -6,12 +6,13 @@ import { requireAdmin } from '../middleware/auth.js';
 import {
   invalidateKnowledgeCache, pickSkills, suggestKeywords, getMemory, saveMemory,
 } from '../services/aiKnowledge.js';
+import { usageSummary } from '../services/aiUsage.js';
 
 const router = Router();
 
 const fail = (res, label, err) => {
   console.error(`${label} error:`, err);
-  const missing = /ai_skills|ai_lessons|ai_customer_memory/.test(err?.message || '') && /exist|schema cache/i.test(err?.message || '');
+  const missing = /ai_skills|ai_lessons|ai_customer_memory|ai_usage_log/.test(err?.message || '') && /exist|schema cache/i.test(err?.message || '');
   res.status(500).json({ error: missing ? 'Tabel pengetahuan AI belum dibuat. Jalankan SQL migrasi di Supabase.' : err.message });
 };
 
@@ -162,6 +163,14 @@ router.put('/memory/:contactId', requireAdmin, async (req, res) => {
     await saveMemory(req.params.contactId, String(req.body?.summary || ''));
     res.json(await getMemory(req.params.contactId));
   } catch (err) { fail(res, 'PUT /ai-sales/memory', err); }
+});
+
+// ── Pemakaian token AI ────────────────────────────────────────────────────
+router.get('/usage', requireAdmin, async (req, res) => {
+  try {
+    const days = Math.min(90, Math.max(1, parseInt(req.query.days, 10) || 30));
+    res.json(await usageSummary(days));
+  } catch (err) { fail(res, 'GET /ai-sales/usage', err); }
 });
 
 export default router;

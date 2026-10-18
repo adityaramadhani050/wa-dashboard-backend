@@ -18,6 +18,7 @@ import { buildSalesContext } from './salesKnowledge.js';
 import { buildKnowledge, refreshMemories, getSalutation, saveSalutation, normalizeSalutation } from './aiKnowledge.js';
 import { STEP_META, getFollowupConfig, completeTask, applyAiOutcome } from './followup.js';
 import { getWorkHours } from '../routes/stats.js';
+import { logAiUsage } from './aiUsage.js';
 import { sendToAgents } from '../push/fcm.js';
 import { sendWebPushToAgents } from '../push/webpush.js';
 
@@ -25,6 +26,7 @@ const KEY = 'ai_sales';
 const MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const HUMAN_ACTIVE_MS = 30 * 60 * 1000; // ada balasan manusia <30 mnt -> AI diam
 const MAX_REPLIES_PER_DAY = 40;          // pengaman per chat
+const HISTORY_LIMIT = 15;                // pesan terakhir yang dibacakan ke AI (hemat token)
 
 export const DEFAULT_AI_SALES = {
   enabled: false,
@@ -106,6 +108,28 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const rand = (a, b) => a + Math.random() * (b - a);
 const skipped = new Map(); // conversationId -> timestamp pesan customer yang sengaja tidak dibalas
 
+// Pesan penutup/basa-basi yang tidak perlu dibalas (tanpa memanggil AI = hemat token).
+const TRIVIAL_WORDS = new Set(('ok oke okey okay okeh okee sip sipp siap baik iya ya yaa yap y mantap mantab ' +
+  'makasih makasi mksh makasii trims terima kasih thanks thank you thx tq ty noted sama sama2 pak bu kak min ' +
+  'nggih injih ok2 oc').split(' '));
+export function isTrivialMessage(m) {
+  if (m.media_type === 'sticker') return true;
+  const raw = String(m.body || '').trim();
+  if (!raw || /^\[.*\]$/.test(raw)) return !!m.media_type && m.media_type === 'sticker';
+  const words = raw.toLowerCase().replace(/[\p{Extended_Pictographic}\uFE0F\u200D]/gu, ' ').replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+  return words.every((w) => TRIVIAL_WORDS.has(w)) && raw.length <= 40;
+}
+// Semua pesan customer yang menunggu sepele & pesan kita sebelumnya bukan pertanyaan.
+export function shouldSkipWithoutAi(msgs) {
+  let i = msgs.length - 1;
+  const pending = [];
+  while (i >= 0 && !msgs[i].from_me) { pending.unshift(msgs[i]); i--; }
+  const lastOut = i >= 0 ? msgs[i] : null;
+  if (!pending.length || !lastOut) return false;          // chat baru: tetap dibalas
+  if (/\?\s*\S{0,3}\s*$/.test(String(lastOut.body || ''))) return false; // kita bertanya -> "ok" adalah jawaban
+  return pending.every(isTrivialMessage);
+}
+
 async function fetchRecentMessages(conversationId) {
   const run = (cols) => supabase.from('messages').select(cols)
     .eq('conversation_id', conversationId)
@@ -157,6 +181,13 @@ async function processConversation(conversationId, { force = false } = {}) {
 
     const { data: agent } = await supabase.from('agents').select('name').eq('id', cfg.agent_id).maybeSingle();
     const persona = cfg.persona_name || agent?.name || 'Sales';
+    if (shouldSkipWithoutAi(msgs)) {
+      skipped.set(conversationId, last.timestamp);
+      await supabase.from('conversations').update({ awaiting_since: null }).eq('id', conversationId);
+      console.log(`[AISales] conv=${conversationId} pesan penutup (tanpa AI), tidak dibalas`);
+      return;
+    }
+
     // Follow-up AI terakhir yang kini dibalas customer -> AI ikut menilai hasilnya
     const fuTask = await pendingAiFollowupOutcome(conversationId, cfg.agent_id, last.timestamp);
     const plan = await generateReply({ conversationId, contactId: conv.contact?.id, waName: conv.contact?.name, msgs, cfg, persona, fuTask });
@@ -213,7 +244,10 @@ function historyText(msgs, persona) {
   }).join('\n');
 }
 
-export function buildSystemPrompt({ persona, style, instructions, ctx, knowledge = '', fuTask = null, waName = '', salutation = null, lowercase = true }) {
+// Prompt TETAP (sama untuk semua chat selama pengaturan tidak berubah) -> diletakkan
+// di depan agar Gemini bisa memakai implicit cache (lebih murah). Data yang
+// berubah per chat ada di buildChatContext() dan dikirim di bagian akhir.
+export function buildSystemPrompt({ persona, style, instructions, ctx, lowercase = true }) {
   const tone = style === 'sopan'
     ? 'sopan & profesional tapi tetap hangat, hindari singkatan alay'
     : 'santai, ramah, khas chat WA sales Indonesia (singkatan WA wajar seperti "yg", "utk", "kalo")';
@@ -226,8 +260,7 @@ PENGETAHUAN PRODUK:
 - Nilai jual: hemat tagihan s/d puluhan persen, balik modal jangka menengah, tahan 25+ tahun, bergaransi, ramah lingkungan.
 - Harga ditentukan kapasitas (kWp), jenis sistem, tagihan listrik bulanan, lokasi & kondisi atap.
 
-KATALOG & HARGA RESMI (satu-satunya sumber angka harga/spek):
-${ctx.productRef || '(katalog belum diisi)'}
+KATALOG & HARGA RESMI: ada di bagian KATALOG pada pesan (satu-satunya sumber angka harga/spek).
 ATURAN HARGA: sebut harga/spek HANYA dari katalog. Jangan mengarang angka. Jangan beri diskon/promo/cicilan yang tidak tertulis di instruksi admin. Bila butuh hitungan khusus, gali kebutuhan atau tawarkan survei untuk hitungan akurat.
 
 ALUR (baca posisi percakapan, pilih yang sesuai):
@@ -235,7 +268,7 @@ ALUR (baca posisi percakapan, pilih yang sesuai):
 2. Diskusi: gali lebih dalam (1 pertanyaan per balasan), beri rekomendasi & edukasi singkat. Bila customer minta harga, beri dari katalog yang paling sesuai.
 3. Survei: bila kebutuhan sudah jelas & customer tertarik, tawarkan survei lokasi gratis. Kumpulkan: nama, alamat lengkap (minimal kota/kecamatan), dan hari/jam yang diinginkan. Setelah lengkap, sampaikan bahwa tim akan mengonfirmasi jadwalnya.
 
-TAG CHAT INI: ${ctx.convTagsText}
+ARTI TAG CHAT (lihat TAG CHAT pada pesan):
 - "Prospek": penawaran sudah dikirim -> tindak lanjuti keputusan & keberatan customer.
 - "Fail": customer tidak lanjut -> balas sopan & ringan, jangan memaksa.
 
@@ -243,9 +276,7 @@ DI LUAR KEMAMPUAN (komplain, garansi/servis unit terpasang, minta ditelepon, per
 Bila customer bertanya apakah kamu bot/AI: jangan berbohong — jawab santai bahwa kamu dibantu sistem tim RenusPro, lalu lanjutkan membantu.
 Media yang tidak bisa kamu lihat (gambar/dokumen/pesan suara): minta customer menjelaskan singkat lewat teks.
 
-SAPAAN CUSTOMER:
-- Nama di WhatsApp: ${waName || '-'} (belum tentu nama asli, jangan dipakai menebak).
-- Panggilan tersimpan: ${salutation || '(belum diketahui)'}.
+SAPAAN CUSTOMER (lihat DATA CUSTOMER pada pesan; nama WhatsApp belum tentu nama asli, jangan dipakai menebak):
 - Pakai "pak"/"bu" + nama (mis. "pak budi", "bu sari") bila panggilan sudah diketahui. Sebelum tahu, pakai "bapak/ibu" atau tanpa sapaan. JANGAN PERNAH memakai "kak", "kakak", atau "Anda".
 - Bila panggilan belum diketahui, tanyakan nama secara natural di awal percakapan (balasan pertama atau kedua), mis. "maaf dengan bapak/ibu siapa ya?", sambil tetap menjawab pertanyaannya. Cukup sekali, jangan diulang bila tidak dijawab. Tentukan pak/bu dari jawaban customer (nama, cara menyebut diri, konteks); bila ragu tetap "bapak/ibu".
 
@@ -260,37 +291,49 @@ TULIS SEPERTI MANUSIA NGETIK WA (penting, customer tidak boleh merasa ini bot):
 
 CONTOH GAYA SALES ASLI KAMI (${ctx.learnSourceNote}) — tiru rasa bahasanya, jangan salin mentah:
 ${ctx.salesStyleRef || '(belum ada contoh)'}
-${instructions ? `\nINSTRUKSI TAMBAHAN DARI ADMIN (wajib dipatuhi):\n${instructions}\n` : ''}${knowledge ? `\n${knowledge}\n` : ''}
-${fuTask ? `\nCATATAN FOLLOW-UP: pesan terakhir kita sebelum customer membalas adalah follow-up tahap ${fuTask.label} (${fuTask.goal}). Nilai respon customer di "followup_outcome": "considering" (masih pertimbangan), "objection" (ada keberatan, isi "objection_category": harga|spek|kebutuhan|timing|approval|kompetitor), "later" (minta dihubungi nanti), "interested" (tertarik lanjut/survei), "lost" (tidak jadi).\n` : ''}
+${instructions ? `\nINSTRUKSI TAMBAHAN DARI ADMIN (wajib dipatuhi):\n${instructions}\n` : ''}
+Bagian INGATAN, SKILL/PLAYBOOK, dan PELAJARAN pada pesan (bila ada) wajib diikuti.
 KELUARAN: JSON saja, tanpa teks lain:
 {"messages": ["bubble 1", "bubble 2 (opsional)"],
  "skip": false (true HANYA bila pesan customer tidak perlu dibalas, messages kosong),
  "prospek": true/false  (true bila balasan ini/sebelumnya sudah memberi penawaran harga/paket, atau customer jelas tertarik membeli),
  "survey": {"ready": true/false (true HANYA bila customer setuju survei & sudah memberi alamat + usulan waktu), "nama": "", "alamat": "", "jadwal": "", "catatan": ""},
  "notify_admin": "" (isi ringkasan singkat bila ada hal yang perlu ditangani admin, selain itu kosong),
- "panggilan": "" (isi "pak <nama>"/"bu <nama>" bila customer sudah menyebut namanya di percakapan, selain itu kosong)${fuTask ? `,
- "followup_outcome": "", "objection_category": ""` : ''}}`;
+ "panggilan": "" (isi "pak <nama>"/"bu <nama>" bila customer sudah menyebut namanya di percakapan, selain itu kosong),
+ "followup_outcome": "", "objection_category": "" (isi HANYA bila ada CATATAN FOLLOW-UP pada pesan: "considering" masih pertimbangan, "objection" ada keberatan + kategori harga|spek|kebutuhan|timing|approval|kompetitor, "later" minta dihubungi nanti, "interested" tertarik lanjut/survei, "lost" tidak jadi)}`;
+}
+
+// Data per chat (dikirim setelah prompt tetap).
+export function buildChatContext({ ctx, knowledge = '', fuTask = null, waName = '', salutation = null }) {
+  return [
+    `KATALOG:\n${ctx.productRef || '(katalog belum diisi)'}`,
+    `TAG CHAT: ${ctx.convTagsText}`,
+    `DATA CUSTOMER: nama di WhatsApp: ${waName || '-'} · panggilan tersimpan: ${salutation || '(belum diketahui)'}`,
+    knowledge || '',
+    fuTask ? `CATATAN FOLLOW-UP: pesan terakhir kita sebelum customer membalas adalah follow-up tahap ${fuTask.label} (${fuTask.goal}). Isi "followup_outcome".` : '',
+  ].filter(Boolean).join('\n\n');
 }
 
 async function generateReply({ conversationId, contactId, waName = '', msgs, cfg, persona, fuTask = null, task = '' }) {
   const salutation = await getSalutation(contactId).catch(() => null);
-  const ctx = await buildSalesContext(conversationId);
-  // Skill relevan dipilih dari pesan customer terbaru (+ balasan terakhir untuk konteks)
+  // Skill & produk relevan dipilih dari pesan customer terbaru
   const chatText = msgs.filter((m) => !m.from_me).slice(-4).map((m) => m.body || '').join('\n');
+  const ctx = await buildSalesContext(conversationId, { chatText: `${chatText}\n${task}` });
   let knowledge = { text: '', used: null };
   try { knowledge = await buildKnowledge({ contactId, chatText }); } catch (e) { console.warn('[AISales] pengetahuan gagal dimuat:', e?.message || e); }
   if (knowledge.used?.skills?.length) console.log(`[AISales] conv=${conversationId} skill: ${knowledge.used.skills.map((s) => s.title).join(', ')}`);
   const result = await client().models.generateContent({
     model: MODEL,
-    contents: `Riwayat chat (terbaru di bawah):\n${historyText(msgs.slice(-30), persona)}\n\n${task || 'Balas pesan customer yang terakhir.'}`,
+    contents: `${buildChatContext({ ctx, knowledge: knowledge.text, fuTask, waName, salutation })}\n\nRIWAYAT CHAT (15 pesan terakhir, terbaru di bawah; konteks lebih lama ada di INGATAN):\n${historyText(msgs.slice(-HISTORY_LIMIT), persona)}\n\n${task || 'Balas pesan customer yang terakhir.'}`,
     config: {
-      systemInstruction: buildSystemPrompt({ persona, style: cfg.style, instructions: cfg.instructions, ctx, knowledge: knowledge.text, fuTask, waName, salutation, lowercase: cfg.lowercase }),
+      systemInstruction: buildSystemPrompt({ persona, style: cfg.style, instructions: cfg.instructions, ctx, lowercase: cfg.lowercase }),
       responseMimeType: 'application/json',
       maxOutputTokens: 600,
       temperature: 0.8,
       thinkingConfig: { thinkingBudget: 0 },
     },
   });
+  logAiUsage(task ? 'ai_followup' : 'ai_sales_reply', MODEL, result);
   const plan = parsePlan(result.text, { salutation, lowercase: cfg.lowercase });
   // Customer baru menyebut namanya -> simpan panggilannya untuk chat berikutnya
   if (plan?.panggilan && plan.panggilan !== salutation) {

@@ -6,6 +6,7 @@
 // Jawa dibuat lengkap; di luar Jawa pulau sudah menentukan regional sehingga
 // cukup nama pulau + kota utama.
 import { GoogleGenAI } from '@google/genai';
+import { logAiUsage } from './aiUsage.js';
 
 export const REGION_LABEL = { barat: 'Barat', timur: 'Timur' };
 
@@ -195,6 +196,7 @@ export async function detectLocationAI(text) {
         },
       },
     });
+    logAiUsage('regional_city', process.env.GEMINI_MODEL || 'gemini-2.5-flash', result);
     let parsed = {};
     try { parsed = JSON.parse(result.text || '{}'); } catch { parsed = {}; }
     const wanted = String(parsed.province || '').trim().toLowerCase();

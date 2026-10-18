@@ -8,11 +8,12 @@
 // AI tetap jalan tanpa pengetahuan tambahan.
 import { GoogleGenAI } from '@google/genai';
 import { supabase } from '../db/supabase.js';
+import { logAiUsage } from './aiUsage.js';
 
 const MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const MAX_SKILLS = 3;
-const MAX_SKILL_CHARS = 9000;   // total isi skill per balasan (hemat token)
-const MAX_LESSONS = 8;
+const MAX_SKILL_CHARS = 5000;   // total isi skill per balasan (hemat token)
+const MAX_LESSONS = 5;
 
 let genai = null;
 function client() {
@@ -175,7 +176,8 @@ export async function saveSalutation(contactId, salutation) {
   await saveMemory(contactId, [`- Panggilan: ${sal}`, ...rest].join('\n'));
 }
 
-const IDLE_MS = 10 * 60 * 1000; // ringkas setelah chat sepi 10 menit
+const IDLE_MS = 30 * 60 * 1000; // ringkas setelah chat sepi 30 menit
+const MIN_NEW_MESSAGES = 4;     // dan minimal 4 pesan baru sejak ringkasan terakhir
 
 async function summarize(previous, transcript) {
   const result = await client().models.generateContent({
@@ -188,10 +190,11 @@ async function summarize(previous, transcript) {
       thinkingConfig: { thinkingBudget: 0 },
     },
   });
+  logAiUsage('memory_summary', MODEL, result);
   return String(result.text || '').trim();
 }
 
-// Perbarui memori untuk chat yang dipegang AI & sudah sepi >= 10 menit sejak
+// Perbarui memori untuk chat yang dipegang AI & sudah sepi >= 30 menit sejak
 // pesan terakhir yang belum diringkas.
 export async function refreshMemories(agentId, { limit = 8 } = {}) {
   if (!agentId || !process.env.GEMINI_API_KEY) return 0;
@@ -212,6 +215,7 @@ export async function refreshMemories(agentId, { limit = 8 } = {}) {
     if (mem?.last_message_at) q = q.gt('timestamp', mem.last_message_at);
     const { data: msgs } = await q;
     if (!msgs?.length) { await saveMemory(c.contact_id, mem?.summary || '', c.last_message_at); continue; }
+    if (msgs.length < MIN_NEW_MESSAGES) continue; // belum cukup bahan; tunggu pesan berikutnya
     const transcript = msgs.map((m) => `${m.from_me ? 'Sales' : 'Customer'}: ${m.body}`).join('\n');
     try {
       const summary = await summarize(mem?.summary, transcript);
@@ -239,5 +243,6 @@ export async function suggestKeywords({ title, when_to_use, content }) {
       thinkingConfig: { thinkingBudget: 0 },
     },
   });
+  logAiUsage('skill_keywords', MODEL, result);
   return String(result.text || '').replace(/\n/g, ', ').replace(/\s*,\s*/g, ', ').replace(/^[,\s]+|[,\s]+$/g, '').slice(0, 600);
 }
