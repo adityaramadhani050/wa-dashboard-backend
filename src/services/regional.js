@@ -5,8 +5,7 @@
 // regional (Banten/DKI/Jabar = Barat, Jateng/DIY/Jatim = Timur), jadi kota-kota
 // Jawa dibuat lengkap; di luar Jawa pulau sudah menentukan regional sehingga
 // cukup nama pulau + kota utama.
-import { GoogleGenAI } from '@google/genai';
-import { logAiUsage } from './aiUsage.js';
+import { generate, aiEnabled, parseJsonLoose } from './llm.js';
 
 export const REGION_LABEL = { barat: 'Barat', timur: 'Timur' };
 
@@ -158,47 +157,26 @@ export function detectFromIntro(text) {
   return null;
 }
 
-// ── Fallback AI (Gemini) ────────────────────────────────────────────────────
-let ai = null;
-function getAi() {
-  if (!process.env.GEMINI_API_KEY) return null;
-  if (!ai) ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-  return ai;
-}
-
+// ── Fallback AI ─────────────────────────────────────────────────────────────
 const PROVINCE_NAMES = Object.keys(PROVINCE_REGION);
 
 export async function detectLocationAI(text) {
-  const client = getAi();
-  if (!client) return null;
+  if (!aiEnabled()) return null;
   const clean = String(text || '').slice(0, 200);
   if (clean.trim().length < 2) return null;
   try {
-    const result = await client.models.generateContent({
-      model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
-      contents:
+    const result = await generate('regional_city', {
+      prompt:
         `Teks berikut adalah jawaban customer ketika ditanya "Kakak berlokasi di kota/kabupaten mana?":\n"""${clean}"""\n\n` +
         `Tentukan PROVINSI di Indonesia tempat lokasi tersebut. Pilih HANYA salah satu dari daftar ini:\n${PROVINCE_NAMES.join(', ')}.\n` +
-        'Jika teks bukan nama lokasi di Indonesia atau tidak bisa dipastikan, isi province dengan string kosong.',
-      config: {
-        systemInstruction: 'Kamu memetakan nama kota/kabupaten/kecamatan/daerah di Indonesia ke provinsinya. Jawab akurat, jangan menebak bila ragu.',
-        maxOutputTokens: 100,
-        temperature: 0,
-        thinkingConfig: { thinkingBudget: 0 },
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: 'OBJECT',
-          properties: {
-            province: { type: 'STRING' },
-            city: { type: 'STRING' },
-          },
-          required: ['province'],
-        },
-      },
+        'Jika teks bukan nama lokasi di Indonesia atau tidak bisa dipastikan, isi province dengan string kosong.\n' +
+        'Balas HANYA JSON: {"province": "...", "city": "..."}',
+      system: 'Kamu memetakan nama kota/kabupaten/kecamatan/daerah di Indonesia ke provinsinya. Jawab akurat, jangan menebak bila ragu.',
+      json: true,
+      maxTokens: 100,
+      temperature: 0,
     });
-    logAiUsage('regional_city', process.env.GEMINI_MODEL || 'gemini-2.5-flash', result);
-    let parsed = {};
-    try { parsed = JSON.parse(result.text || '{}'); } catch { parsed = {}; }
+    const parsed = parseJsonLoose(result.text) || {};
     const wanted = String(parsed.province || '').trim().toLowerCase();
     if (!wanted) return null;
     const province = PROVINCE_NAMES.find((p) => p.toLowerCase() === wanted);

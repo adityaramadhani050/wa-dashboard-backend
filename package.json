@@ -12,7 +12,6 @@
     "token:bot": "node scripts/gen-bot-token.js"
   },
   "dependencies": {
-    "@google/genai": "^2.10.0",
     "@supabase/supabase-js": "^2.45.0",
     "@whiskeysockets/baileys": "^6.7.9",
     "bcryptjs": "^2.4.3",
@@ -20,8 +19,8 @@
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "express-rate-limit": "^7.4.1",
-    "helmet": "^8.0.0",
     "firebase-admin": "^14.1.0",
+    "helmet": "^8.0.0",
     "ioredis": "^5.3.2",
     "jsonwebtoken": "^9.0.3",
     "link-preview-js": "^3.0.5",

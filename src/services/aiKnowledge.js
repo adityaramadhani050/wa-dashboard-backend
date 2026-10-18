@@ -6,20 +6,12 @@
 //    percakapan dengan AI berhenti sejenak, dipakai saat customer kembali.
 // Tabel (SQL migrasi): ai_skills, ai_lessons, ai_customer_memory. Bila belum ada,
 // AI tetap jalan tanpa pengetahuan tambahan.
-import { GoogleGenAI } from '@google/genai';
 import { supabase } from '../db/supabase.js';
-import { logAiUsage } from './aiUsage.js';
+import { generate, aiEnabled } from './llm.js';
 
-const MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const MAX_SKILLS = 3;
 const MAX_SKILL_CHARS = 5000;   // total isi skill per balasan (hemat token)
 const MAX_LESSONS = 5;
-
-let genai = null;
-function client() {
-  if (!genai) genai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-  return genai;
-}
 
 // ── Pencocokan teks sederhana (Bahasa Indonesia) ──────────────────────────
 const STOP = new Set(('yang dan di ke dari ini itu untuk dengan ada tidak saya kami kita kak kakak bisa mau apa ' +
@@ -180,24 +172,19 @@ const IDLE_MS = 30 * 60 * 1000; // ringkas setelah chat sepi 30 menit
 const MIN_NEW_MESSAGES = 4;     // dan minimal 4 pesan baru sejak ringkasan terakhir
 
 async function summarize(previous, transcript) {
-  const result = await client().models.generateContent({
-    model: MODEL,
-    contents: `Ringkasan sebelumnya:\n${previous || '(belum ada)'}\n\nPercakapan baru:\n${transcript}`,
-    config: {
-      systemInstruction: 'Kamu mencatat fakta penting tentang seorang calon customer PLTS untuk tim sales. Gabungkan ringkasan sebelumnya dengan percakapan baru menjadi catatan ringkas berbentuk poin (maks 8 poin, tiap poin singkat). Baris pertama WAJIB "- Panggilan: pak/bu <nama>" bila sudah diketahui (pertahankan dari ringkasan sebelumnya). Fokus: nama, lokasi, jenis bangunan, tagihan listrik/kebutuhan daya, tujuan, produk/paket yang dibahas & harga yang sudah disebut, keberatan, status (tertarik/ragu/survei diminta/tidak lanjut), janji atau hal yang harus ditindaklanjuti. Jangan mengarang. Tulis dalam Bahasa Indonesia, tanpa pembuka/penutup.',
-      maxOutputTokens: 500,
-      temperature: 0.2,
-      thinkingConfig: { thinkingBudget: 0 },
-    },
+  const result = await generate('memory_summary', {
+    prompt: `Ringkasan sebelumnya:\n${previous || '(belum ada)'}\n\nPercakapan baru:\n${transcript}`,
+    system: 'Kamu mencatat fakta penting tentang seorang calon customer PLTS untuk tim sales. Gabungkan ringkasan sebelumnya dengan percakapan baru menjadi catatan ringkas berbentuk poin (maks 8 poin, tiap poin singkat). Baris pertama WAJIB "- Panggilan: pak/bu <nama>" bila sudah diketahui (pertahankan dari ringkasan sebelumnya). Fokus: nama, lokasi, jenis bangunan, tagihan listrik/kebutuhan daya, tujuan, produk/paket yang dibahas & harga yang sudah disebut, keberatan, status (tertarik/ragu/survei diminta/tidak lanjut), janji atau hal yang harus ditindaklanjuti. Jangan mengarang. Tulis dalam Bahasa Indonesia, tanpa pembuka/penutup.',
+    maxTokens: 500,
+    temperature: 0.2,
   });
-  logAiUsage('memory_summary', MODEL, result);
   return String(result.text || '').trim();
 }
 
 // Perbarui memori untuk chat yang dipegang AI & sudah sepi >= 30 menit sejak
 // pesan terakhir yang belum diringkas.
 export async function refreshMemories(agentId, { limit = 8 } = {}) {
-  if (!agentId || !process.env.GEMINI_API_KEY) return 0;
+  if (!agentId || !aiEnabled()) return 0;
   const probe = await supabase.from('ai_customer_memory').select('contact_id').limit(1);
   if (probe.error) return 0; // tabel belum dimigrasi
   const cutoff = new Date(Date.now() - IDLE_MS).toISOString();
@@ -232,17 +219,12 @@ export async function refreshMemories(agentId, { limit = 8 } = {}) {
 
 // Saran kata kunci untuk skill (dipakai saat admin menyimpan skill tanpa kata kunci).
 export async function suggestKeywords({ title, when_to_use, content }) {
-  if (!process.env.GEMINI_API_KEY) return '';
-  const result = await client().models.generateContent({
-    model: MODEL,
-    contents: `Judul: ${title}\nKapan dipakai: ${when_to_use || '-'}\nIsi:\n${clip(content, 4000)}`,
-    config: {
-      systemInstruction: 'Buat daftar 8-15 kata kunci/frasa pendek (Bahasa Indonesia sehari-hari, termasuk sinonim & singkatan yang biasa dipakai customer di WhatsApp) yang menandakan pesan customer membutuhkan pedoman ini. Balas HANYA daftar dipisah koma, huruf kecil.',
-      maxOutputTokens: 200,
-      temperature: 0.3,
-      thinkingConfig: { thinkingBudget: 0 },
-    },
+  if (!aiEnabled()) return '';
+  const result = await generate('skill_keywords', {
+    prompt: `Judul: ${title}\nKapan dipakai: ${when_to_use || '-'}\nIsi:\n${clip(content, 4000)}`,
+    system: 'Buat daftar 8-15 kata kunci/frasa pendek (Bahasa Indonesia sehari-hari, termasuk sinonim & singkatan yang biasa dipakai customer di WhatsApp) yang menandakan pesan customer membutuhkan pedoman ini. Balas HANYA daftar dipisah koma, huruf kecil.',
+    maxTokens: 200,
+    temperature: 0.3,
   });
-  logAiUsage('skill_keywords', MODEL, result);
   return String(result.text || '').replace(/\n/g, ', ').replace(/\s*,\s*/g, ', ').replace(/^[,\s]+|[,\s]+$/g, '').slice(0, 600);
 }

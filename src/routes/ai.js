@@ -1,9 +1,8 @@
 import { Router } from 'express';
-import { GoogleGenAI } from '@google/genai';
 import { supabase } from '../db/supabase.js';
 import { STEP_META, OBJECTIONS } from '../services/followup.js';
 import { buildSalesContext } from '../services/salesKnowledge.js';
-import { logAiUsage } from '../services/aiUsage.js';
+import { generate, aiEnabled, isQuotaError } from '../services/llm.js';
 import { getSalutation } from '../services/aiKnowledge.js';
 import { humanizeText, getAiSalesConfig } from '../services/aiSales.js';
 
@@ -21,14 +20,12 @@ async function styleFor(conversationId) {
 }
 
 const router = Router();
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-const MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 
 router.post('/suggest', async (req, res) => {
   try {
     const { conversation_id } = req.body;
     if (!conversation_id) return res.status(400).json({ error: 'conversation_id is required' });
-    if (!process.env.GEMINI_API_KEY) return res.status(500).json({ error: 'GEMINI_API_KEY belum diset di server' });
+    if (!aiEnabled()) return res.status(500).json({ error: 'OPENROUTER_API_KEY belum diset di server' });
 
     const { data: messages, error: msgError } = await supabase
       .from('messages')
@@ -109,36 +106,18 @@ ${templateRef || '(tidak ada template)'}
 
 PENTING: Balas HANYA dengan teks saran balasan siap kirim, singkat seperti yang benar-benar akan diketik sales di WA. Tanpa basa-basi, tanpa penjelasan, tanpa tanda kutip, tanpa label.`;
 
-    const result = await ai.models.generateContent({
-      model: MODEL,
-      contents: `Riwayat chat:\n${history}\n\nBerikan satu saran balasan SINGKAT (maks 1-2 kalimat) untuk pesan terakhir customer. Tentukan dulu percakapan ini ada di TAHAP berapa (1 prospecting/value, 2 discovery/solusi, 3 baru survei) lalu balas sesuai tahap itu. Default: gali kebutuhan / beri value — JANGAN tawarkan survei kecuali sudah Tahap 3.`,
-      config: {
-        systemInstruction: systemPrompt,
-        maxOutputTokens: 300,
-        temperature: 0.95,
-        topP: 0.95,
-        // Matikan "thinking" agar seluruh token output dipakai untuk jawaban
-        // (kalau aktif, jawaban bisa terpotong di gemini-2.5-flash)
-        thinkingConfig: { thinkingBudget: 0 },
-      },
+    const result = await generate('suggest_reply', {
+      system: systemPrompt,
+      prompt: `Riwayat chat:\n${history}\n\nBerikan satu saran balasan SINGKAT (maks 1-2 kalimat) untuk pesan terakhir customer. Tentukan dulu percakapan ini ada di TAHAP berapa (1 prospecting/value, 2 discovery/solusi, 3 baru survei) lalu balas sesuai tahap itu. Default: gali kebutuhan / beri value — JANGAN tawarkan survei kecuali sudah Tahap 3.`,
+      maxTokens: 300,
+      temperature: 0.95,
+      topP: 0.95,
     });
 
-    logAiUsage('suggest_reply', MODEL, result);
     const suggestion = humanizeText(result.text || '', style);
     res.json({ suggestion });
   } catch (err) {
-    console.error('POST /ai/suggest error:', err);
-    // Deteksi limit/kuota Gemini (429 RESOURCE_EXHAUSTED)
-    const status = err?.status ?? err?.code ?? err?.response?.status;
-    const msg = String(err?.message || '');
-    const isQuota = status === 429 || /RESOURCE_EXHAUSTED|quota|rate limit/i.test(msg);
-    if (isQuota) {
-      return res.status(429).json({
-        error: 'Kuota AI sedang penuh. Tunggu sebentar lalu coba lagi.',
-        code: 'AI_QUOTA',
-      });
-    }
-    res.status(500).json({ error: err.message });
+    handleAiError(err, res, 'POST /ai/suggest');
   }
 });
 
@@ -163,7 +142,7 @@ router.post('/followup-draft', async (req, res) => {
   try {
     const { conversation_id, step } = req.body;
     if (!conversation_id || !step) return res.status(400).json({ error: 'conversation_id dan step wajib diisi' });
-    if (!process.env.GEMINI_API_KEY) return res.status(500).json({ error: 'GEMINI_API_KEY belum diset di server' });
+    if (!aiEnabled()) return res.status(500).json({ error: 'OPENROUTER_API_KEY belum diset di server' });
     const meta = STEP_META[step];
     if (!meta) return res.status(400).json({ error: 'Tahap follow-up tidak dikenal' });
 
@@ -181,26 +160,21 @@ router.post('/followup-draft', async (req, res) => {
       ? `Keberatan customer yang tercatat: ${OBJECTIONS[objection.objection_category] || objection.objection_category}${objection.note ? ` (catatan agent: ${objection.note})` : ''}.`
       : 'Belum ada keberatan yang tercatat.';
 
-    const result = await ai.models.generateContent({
-      model: MODEL,
-      contents:
+    const result = await generate('followup_draft', {
+      prompt:
         `Tahap follow-up: ${meta.label} — tujuan: ${meta.goal}\n${objectionText}\n` +
         `Nama di WhatsApp: ${name || '(tidak diketahui)'} (belum tentu nama asli)\n\nRiwayat chat:\n${history || '(kosong)'}\n\n` +
         'Tulis SATU pesan WhatsApp follow-up untuk dikirim sales ke customer ini.',
-      config: {
-        systemInstruction:
-          'Kamu sales PLTS (panel surya) yang ramah dan profesional. Tulis pesan follow-up WhatsApp berbahasa Indonesia yang ' +
-          'singkat (2-4 kalimat), personal, merujuk penawaran/diskusi terakhir di riwayat chat, sesuai tujuan tahap. ' +
-          `${style.rule} Jangan mengarang harga/spesifikasi yang tidak ada di riwayat. ` +
-          'Untuk tahap VALUES, tawarkan informasi tambahan yang relevan dengan keberatan customer. ' +
-          'Jangan memaksa. Jawab HANYA isi pesannya.',
-        maxOutputTokens: 400,
-        temperature: 0.7,
-        thinkingConfig: { thinkingBudget: 0 },
-      },
+      system:
+        'Kamu sales PLTS (panel surya) yang ramah dan profesional. Tulis pesan follow-up WhatsApp berbahasa Indonesia yang ' +
+        'singkat (2-4 kalimat), personal, merujuk penawaran/diskusi terakhir di riwayat chat, sesuai tujuan tahap. ' +
+        `${style.rule} Jangan mengarang harga/spesifikasi yang tidak ada di riwayat. ` +
+        'Untuk tahap VALUES, tawarkan informasi tambahan yang relevan dengan keberatan customer. ' +
+        'Jangan memaksa. Jawab HANYA isi pesannya.',
+      maxTokens: 400,
+      temperature: 0.7,
     });
 
-    logAiUsage('followup_draft', MODEL, result);
     res.json({ draft: humanizeText(result.text || '', style) });
   } catch (err) {
     handleAiError(err, res, 'POST /ai/followup-draft');
@@ -209,10 +183,8 @@ router.post('/followup-draft', async (req, res) => {
 
 function handleAiError(err, res, label) {
   console.error(`${label} error:`, err);
-  const status = err?.status ?? err?.code ?? err?.response?.status;
-  const msg = String(err?.message || '');
-  if (status === 429 || /RESOURCE_EXHAUSTED|quota|rate limit/i.test(msg)) {
-    return res.status(429).json({ error: 'Kuota AI sedang penuh. Tunggu sebentar lalu coba lagi.', code: 'AI_QUOTA' });
+  if (isQuotaError(err)) {
+    return res.status(429).json({ error: 'Kuota/limit model AI sedang penuh. Tunggu sebentar lalu coba lagi, atau ganti model di Manajemen Agent → AI Sales → Model AI.', code: 'AI_QUOTA' });
   }
   res.status(500).json({ error: err.message });
 }

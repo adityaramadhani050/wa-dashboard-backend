@@ -10,7 +10,6 @@
 // - Hal di luar kemampuan (komplain, harga di luar katalog, dll.) -> AI membalas
 //   sopan "dicek dulu" & mengirim notifikasi ke admin.
 import { randomBytes } from 'crypto';
-import { GoogleGenAI } from '@google/genai';
 import { supabase } from '../db/supabase.js';
 import { getSock, broadcast, bumpConvOutgoing } from '../baileys/connection.js';
 import { markBotMessageId } from './regionalBot.js';
@@ -18,12 +17,11 @@ import { buildSalesContext } from './salesKnowledge.js';
 import { buildKnowledge, refreshMemories, getSalutation, saveSalutation, normalizeSalutation } from './aiKnowledge.js';
 import { STEP_META, getFollowupConfig, completeTask, applyAiOutcome } from './followup.js';
 import { getWorkHours } from '../routes/stats.js';
-import { logAiUsage } from './aiUsage.js';
+import { generate, aiEnabled } from './llm.js';
 import { sendToAgents } from '../push/fcm.js';
 import { sendWebPushToAgents } from '../push/webpush.js';
 
 const KEY = 'ai_sales';
-const MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const HUMAN_ACTIVE_MS = 30 * 60 * 1000; // ada balasan manusia <30 mnt -> AI diam
 const MAX_REPLIES_PER_DAY = 40;          // pengaman per chat
 const HISTORY_LIMIT = 15;                // pesan terakhir yang dibacakan ke AI (hemat token)
@@ -94,7 +92,7 @@ export async function onIncomingForAi(conversationId) {
 // opts.force: admin sengaja meng-assign chat ke AI -> abaikan cek "manusia aktif"
 export async function scheduleAiReply(conversationId, delayMs, opts = {}) {
   const cfg = await getAiSalesConfig();
-  if (!cfg.enabled || !cfg.agent_id || !process.env.GEMINI_API_KEY) return;
+  if (!cfg.enabled || !cfg.agent_id || !aiEnabled()) return;
   const wait = delayMs ?? cfg.reply_delay_sec * 1000;
   clearTimeout(timers.get(conversationId));
   timers.set(conversationId, setTimeout(() => {
@@ -227,11 +225,6 @@ async function processConversation(conversationId, { force = false } = {}) {
 }
 
 // ── Otak AI ───────────────────────────────────────────────────────────────
-let genai = null;
-function client() {
-  if (!genai) genai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-  return genai;
-}
 
 const MEDIA_LABEL = { image: 'gambar', video: 'video', audio: 'pesan suara', document: 'dokumen', sticker: 'stiker', location: 'lokasi', contact: 'kontak' };
 
@@ -245,7 +238,7 @@ function historyText(msgs, persona) {
 }
 
 // Prompt TETAP (sama untuk semua chat selama pengaturan tidak berubah) -> diletakkan
-// di depan agar Gemini bisa memakai implicit cache (lebih murah). Data yang
+// di depan agar penyedia model bisa memakai prompt cache (lebih murah). Data yang
 // berubah per chat ada di buildChatContext() dan dikirim di bagian akhir.
 export function buildSystemPrompt({ persona, style, instructions, ctx, lowercase = true }) {
   const tone = style === 'sopan'
@@ -322,18 +315,13 @@ async function generateReply({ conversationId, contactId, waName = '', msgs, cfg
   let knowledge = { text: '', used: null };
   try { knowledge = await buildKnowledge({ contactId, chatText }); } catch (e) { console.warn('[AISales] pengetahuan gagal dimuat:', e?.message || e); }
   if (knowledge.used?.skills?.length) console.log(`[AISales] conv=${conversationId} skill: ${knowledge.used.skills.map((s) => s.title).join(', ')}`);
-  const result = await client().models.generateContent({
-    model: MODEL,
-    contents: `${buildChatContext({ ctx, knowledge: knowledge.text, fuTask, waName, salutation })}\n\nRIWAYAT CHAT (15 pesan terakhir, terbaru di bawah; konteks lebih lama ada di INGATAN):\n${historyText(msgs.slice(-HISTORY_LIMIT), persona)}\n\n${task || 'Balas pesan customer yang terakhir.'}`,
-    config: {
-      systemInstruction: buildSystemPrompt({ persona, style: cfg.style, instructions: cfg.instructions, ctx, lowercase: cfg.lowercase }),
-      responseMimeType: 'application/json',
-      maxOutputTokens: 600,
-      temperature: 0.8,
-      thinkingConfig: { thinkingBudget: 0 },
-    },
+  const result = await generate(task ? 'ai_followup' : 'ai_sales_reply', {
+    system: buildSystemPrompt({ persona, style: cfg.style, instructions: cfg.instructions, ctx, lowercase: cfg.lowercase }),
+    prompt: `${buildChatContext({ ctx, knowledge: knowledge.text, fuTask, waName, salutation })}\n\nRIWAYAT CHAT (15 pesan terakhir, terbaru di bawah; konteks lebih lama ada di INGATAN):\n${historyText(msgs.slice(-HISTORY_LIMIT), persona)}\n\n${task || 'Balas pesan customer yang terakhir.'}`,
+    json: true,
+    maxTokens: 600,
+    temperature: 0.8,
   });
-  logAiUsage(task ? 'ai_followup' : 'ai_sales_reply', MODEL, result);
   const plan = parsePlan(result.text, { salutation, lowercase: cfg.lowercase });
   // Customer baru menyebut namanya -> simpan panggilannya untuk chat berikutnya
   if (plan?.panggilan && plan.panggilan !== salutation) {
@@ -557,7 +545,7 @@ Pada keluaran ini "skip" harus false dan "prospek"/"survey" false.`;
 
 export async function runAiFollowups({ maxPerRun = 5 } = {}) {
   const cfg = await getAiSalesConfig();
-  if (!cfg.enabled || !cfg.followup_enabled || !cfg.agent_id || !process.env.GEMINI_API_KEY) return 0;
+  if (!cfg.enabled || !cfg.followup_enabled || !cfg.agent_id || !aiEnabled()) return 0;
   if (!(await withinSendHours())) return 0;
   const { data: tasks, error } = await supabase.from('followup_tasks')
     .select('id, conversation_id, step, due_at, conversation:conversations (assigned_to, wa_jid, contact:contacts (id, name, phone))')
@@ -583,7 +571,7 @@ export async function runAiFollowups({ maxPerRun = 5 } = {}) {
 // manual ke AI, server restart, atau pesan yang terlewat). ────────────────
 async function sweep() {
   const cfg = await getAiSalesConfig();
-  if (!cfg.enabled || !cfg.agent_id || !process.env.GEMINI_API_KEY) return;
+  if (!cfg.enabled || !cfg.agent_id || !aiEnabled()) return;
   const cutoff = new Date(Date.now() - cfg.reply_delay_sec * 1000).toISOString();
   const { data, error } = await supabase.from('conversations')
     .select('id').eq('assigned_to', cfg.agent_id)

@@ -5,6 +5,7 @@ import { invalidateAutoAssignCache, distributeUnassigned } from '../services/aut
 import { runMediaTtlAll } from '../services/mediaTtl.js';
 import { parseRegionalSettings, invalidateRegionalSettingsCache } from '../services/regionalBot.js';
 import { getAiSalesConfig, saveAiSalesConfig } from '../services/aiSales.js';
+import { aiEnabled, getAiModels, saveAiModels } from '../services/llm.js';
 
 const router = Router();
 
@@ -14,7 +15,7 @@ router.get('/ai-sales', async (req, res) => {
   try {
     const cfg = await getAiSalesConfig();
     if (req.user?.role !== 'admin') return res.json({ enabled: cfg.enabled, agent_id: cfg.agent_id });
-    res.json({ ...cfg, gemini: !!process.env.GEMINI_API_KEY });
+    res.json({ ...cfg, ai_ready: aiEnabled() });
   } catch (err) {
     console.error('GET /settings/ai-sales error:', err);
     res.status(500).json({ error: err.message });
@@ -33,9 +34,28 @@ router.put('/ai-sales', requireAdmin, async (req, res) => {
       return res.status(400).json({ error: 'Pilih akun agent untuk AI Sales terlebih dahulu.' });
     }
     const saved = await saveAiSalesConfig(body);
-    res.json({ ...saved, gemini: !!process.env.GEMINI_API_KEY });
+    res.json({ ...saved, ai_ready: aiEnabled() });
   } catch (err) {
     console.error('PUT /settings/ai-sales error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Model AI (OpenRouter) per fitur — admin.
+router.get('/ai-models', requireAdmin, async (req, res) => {
+  try {
+    res.json({ ...(await getAiModels()), ai_ready: aiEnabled() });
+  } catch (err) {
+    console.error('GET /settings/ai-models error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.put('/ai-models', requireAdmin, async (req, res) => {
+  try {
+    res.json({ ...(await saveAiModels(req.body || {})), ai_ready: aiEnabled() });
+  } catch (err) {
+    console.error('PUT /settings/ai-models error:', err);
     res.status(500).json({ error: err.message });
   }
 });

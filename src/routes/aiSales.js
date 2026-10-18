@@ -6,7 +6,8 @@ import { requireAdmin } from '../middleware/auth.js';
 import {
   invalidateKnowledgeCache, pickSkills, suggestKeywords, getMemory, saveMemory,
 } from '../services/aiKnowledge.js';
-import { usageSummary } from '../services/aiUsage.js';
+import { usageSummary, AI_FEATURES } from '../services/aiUsage.js';
+import { generate, listModels, keyStatus, aiEnabled } from '../services/llm.js';
 
 const router = Router();
 
@@ -171,6 +172,41 @@ router.get('/usage', requireAdmin, async (req, res) => {
     const days = Math.min(90, Math.max(1, parseInt(req.query.days, 10) || 30));
     res.json(await usageSummary(days));
   } catch (err) { fail(res, 'GET /ai-sales/usage', err); }
+});
+
+// ── Model AI (OpenRouter) ─────────────────────────────────────────────────
+router.get('/models', requireAdmin, async (req, res) => {
+  try {
+    res.json({ models: await listModels(), features: AI_FEATURES });
+  } catch (err) {
+    console.error('GET /ai-sales/models error:', err);
+    res.status(502).json({ error: `Gagal mengambil daftar model OpenRouter: ${err.message}` });
+  }
+});
+
+router.get('/openrouter', requireAdmin, async (req, res) => {
+  try { res.json(await keyStatus()); } catch (err) { fail(res, 'GET /ai-sales/openrouter', err); }
+});
+
+// Tes satu model dengan contoh chat customer (tanpa cadangan) -> lihat gaya & kecepatannya
+router.post('/models/test', requireAdmin, async (req, res) => {
+  const model = String(req.body?.model || '').trim();
+  if (!model) return res.status(400).json({ error: 'Model wajib diisi.' });
+  if (!aiEnabled()) return res.status(500).json({ error: 'OPENROUTER_API_KEY belum diset di server' });
+  const sample = String(req.body?.message || 'halo, mau tanya pasang panel surya buat rumah kira2 berapa ya? tagihan listrik saya sekitar 800rb sebulan').slice(0, 500);
+  const started = Date.now();
+  try {
+    const out = await generate(req.body?.feature in AI_FEATURES ? req.body.feature : 'suggest_reply', {
+      models: [model],
+      system: 'Kamu sales PLTS (panel surya) di Indonesia yang membalas chat WhatsApp customer. Tulis seperti manusia mengetik di HP: santai, sopan, huruf kecil semua, 1-2 kalimat pendek, sapa "bapak/ibu" (jangan "kak" atau "Anda"), tanyakan 1 hal untuk menggali kebutuhan. Balas HANYA isi pesannya.',
+      prompt: `Customer: ${sample}`,
+      maxTokens: 200,
+      temperature: 0.8,
+    });
+    res.json({ ok: true, model: out.model, text: out.text, ms: Date.now() - started });
+  } catch (err) {
+    res.json({ ok: false, model, error: err.message, status: err.status || null, ms: Date.now() - started });
+  }
 });
 
 export default router;
