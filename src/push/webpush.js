@@ -2,6 +2,7 @@ import webpush from 'web-push';
 import { supabase } from '../db/supabase.js';
 
 let configured = false;
+const PUSH_TTL_SEC = 12 * 3600;
 
 function init() {
   if (configured) return true;
@@ -42,7 +43,9 @@ async function sendToSubs(rows, payload, label = '') {
     rows.map(async (row) => {
       try {
         const sub = JSON.parse(row.token);
-        await webpush.sendNotification(sub, body);
+        // Prioritas tinggi: tidak ditunda mode hemat baterai HP. Berlaku 12 jam
+        // bagi device yang sedang offline (tidak dibanjiri notifikasi basi).
+        await webpush.sendNotification(sub, body, { TTL: PUSH_TTL_SEC, urgency: 'high' });
         ok++;
       } catch (e) {
         fail++;

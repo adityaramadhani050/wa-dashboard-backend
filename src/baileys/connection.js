@@ -466,7 +466,9 @@ export async function pushNewMessage(payload) {
   const { conversationId, contactName, phone, message } = payload
   const title = contactName || phone || 'Pesan baru'
   const body = message?.body || 'Pesan baru masuk'
-  const data = { conversationId: String(conversationId) }
+  // messageId: dashboard yang sedang terbuka mencocokkan push dengan pesan dari
+  // socket — bila socket melewatkannya, push dipakai sebagai cadangan notifikasi.
+  const data = { conversationId: String(conversationId), messageId: message?.id ? String(message.id) : '' }
   try {
     const { data: conv } = await supabase
       .from('conversations')
@@ -477,6 +479,7 @@ export async function pushNewMessage(payload) {
     // Target notifikasi: agent yang menangani + SEMUA admin (admin memantau semua chat).
     const ids = new Set()
     if (conv?.assigned_to) ids.add(conv.assigned_to)
+    data.assignedTo = conv?.assigned_to ? String(conv.assigned_to) : ''
     const { data: admins } = await supabase.from('agents').select('id').eq('role', 'admin')
     ;(admins || []).forEach((a) => ids.add(a.id))
     const targetIds = [...ids]
@@ -688,6 +691,11 @@ async function persistMessage(msg, { isLive }) {
   }
 
   const payload = { message: savedMessage, conversationId, contactId, contactName: contactName || phone, phone }
+  // Agent pemegang chat -> dashboard hanya membunyikan notifikasi untuk agent tsb (+ admin)
+  if (!fromMe) {
+    const { data: convRow } = await supabase.from('conversations').select('assigned_to').eq('id', conversationId).maybeSingle()
+    payload.assignedTo = convRow?.assigned_to || null
+  }
   const published = await publish('new_message', payload)
   if (!published) ioInstance?.emit('new_message', payload)
   console.log(`[Recv${isLive ? '' : '/sync'}] ${fromMe ? 'out' : 'in '} conv=${conversationId} db=${tDb - tStart}ms${mediaInfo ? ` media=${mediaInfo.type}(bg)` : ''}`)

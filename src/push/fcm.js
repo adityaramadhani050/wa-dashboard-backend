@@ -34,7 +34,7 @@ async function sendToTokens(tokens, { title, body, data }) {
       tokens,
       notification: { title, body },
       data: Object.fromEntries(Object.entries(data || {}).map(([k, v]) => [k, String(v)])),
-      android: { priority: 'high' },
+      android: { priority: 'high', ttl: 12 * 3600 * 1000 }, // berlaku 12 jam bila HP offline
     });
     // Bersihkan token yang sudah tidak valid
     const invalid = [];

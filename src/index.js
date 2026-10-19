@@ -40,7 +40,7 @@ import { startRegionalBotJob } from './services/regionalBot.js'
 import { startFollowupJob } from './services/followup.js'
 import { startAiSalesJob } from './services/aiSales.js'
 import { startAiTeamJob } from './services/aiTeam.js'
-import { subscriber, redisAvailable } from './db/redis.js'
+import { subscriber, redisAvailable, INSTANCE_ID, REDIS_PREFIX } from './db/redis.js'
 
 // Cegah proses mati karena error async internal Baileys yang tidak bisa kita
 // tangkap (mis. "Connection Closed" saat Baileys mengirim retry-request untuk
@@ -75,23 +75,29 @@ const io = new Server(httpServer, {
 
 setIO(io)
 
-const REDIS_CHANNELS = ['new_message', 'message_status', 'message_updated', 'conversation_assigned', 'conversation_updated']
-
+// Event realtime selalu di-emit langsung oleh instance yang membuatnya; Redis
+// (bila ada) hanya meneruskan ke instance lain. Pesan dari instance sendiri diabaikan.
 if (redisAvailable && subscriber) {
-  subscriber.subscribe(...REDIS_CHANNELS, (err) => {
+  subscriber.psubscribe(`${REDIS_PREFIX}*`, (err) => {
     if (err) console.error('[Redis] Subscribe error:', err.message)
-    else console.log(`[Redis] Subscribed to: ${REDIS_CHANNELS.join(', ')}`)
+    else console.log('[Redis] Subscribed: event realtime antar instance')
   })
-  subscriber.on('message', (channel, raw) => {
+  subscriber.on('pmessage', (_pattern, channel, raw) => {
     try {
-      const data = JSON.parse(raw)
-      io.emit(channel, data)
+      const msg = JSON.parse(raw)
+      if (msg?.src === INSTANCE_ID) return
+      io.emit(channel.slice(REDIS_PREFIX.length), msg?.data ?? msg)
     } catch {}
   })
-  console.log('[Redis] Pub/sub enabled')
+  console.log('[Redis] Pub/sub antar instance aktif')
 } else {
-  console.log('[Redis] Not configured — using direct Socket.io emit')
+  console.log('[Redis] Tidak dikonfigurasi — emit Socket.io langsung')
 }
+
+// Heartbeat aplikasi: klien memastikan koneksinya benar-benar hidup (bukan "zombie")
+io.on('connection', (socket) => {
+  socket.on('hb', (ack) => { if (typeof ack === 'function') ack(Date.now()) })
+})
 
 app.use(helmet({
   crossOriginResourcePolicy: false, // API JSON lintas-origin (frontend beda domain)
