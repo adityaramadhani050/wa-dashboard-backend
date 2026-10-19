@@ -4,7 +4,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const BUCKET = 'wa-media';
 
 // Ambil path file di storage dari public URL (.../object/public/wa-media/<path>)
-function storagePathFromUrl(url) {
+export function storagePathFromUrl(url) {
   if (!url) return null;
   const marker = `/${BUCKET}/`;
   const i = url.indexOf(marker);

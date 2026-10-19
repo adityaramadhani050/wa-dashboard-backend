@@ -7,6 +7,7 @@ import { onTagsChanged as onFollowupTagsChanged } from '../services/followup.js'
 import { waitSessions, workMinutes, getWorkHours, KPI_MINUTES } from './stats.js';
 import { getAiSalesConfig, scheduleAiReply } from '../services/aiSales.js';
 import { sendOwned } from '../utils/waSend.js';
+import { storagePathFromUrl } from '../services/mediaTtl.js';
 
 const router = Router();
 
@@ -152,13 +153,64 @@ router.get('/:id/messages', async (req, res) => {
   }
 });
 
-router.delete('/:id', async (req, res) => {
+// Hapus chat (admin): seluruh pesan + file media di storage + data turunan chat
+// (tag, follow-up, Tanya Tim). Kontak, catatan kontak & Ingatan AI tetap ada.
+// Chat di WhatsApp (HP & customer) tidak terhapus.
+router.delete('/:id', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    await supabase.from('messages').delete().eq('conversation_id', id);
+    const { data: conv } = await supabase.from('conversations').select('id').eq('id', id).maybeSingle();
+    if (!conv) return res.status(404).json({ error: 'Chat tidak ditemukan' });
+
+    // File media pesan (best-effort; kegagalan storage tidak membatalkan hapus chat).
+    // File yang juga dipakai Galeri Produk atau pesan di chat lain (forward,
+    // broadcast) TIDAK dihapus.
+    const urls = new Set();
+    for (const cols of ['media_url, media_thumb_url', 'media_url']) {
+      let ok = true;
+      for (let from = 0; ; from += 1000) {
+        const { data, error } = await supabase.from('messages').select(cols)
+          .eq('conversation_id', id).not('media_url', 'is', null).range(from, from + 999);
+        if (error) { ok = false; break; } // kolom media_thumb_url mungkin belum ada
+        for (const m of data || []) { if (m.media_url) urls.add(m.media_url); if (m.media_thumb_url) urls.add(m.media_thumb_url); }
+        if (!data || data.length < 1000) break;
+      }
+      if (ok) break;
+    }
+    const shared = new Set();
+    const list = [...urls];
+    for (let i = 0; i < list.length; i += 100) {
+      const chunk = list.slice(i, i + 100);
+      const [qm, other] = await Promise.all([
+        supabase.from('quick_media').select('media_url').in('media_url', chunk),
+        supabase.from('messages').select('media_url').in('media_url', chunk).neq('conversation_id', id).limit(1000),
+      ]);
+      for (const r of [...(qm.data || []), ...(other.data || [])]) shared.add(r.media_url);
+      if ((qm.error && !/quick_media/.test(qm.error.message || '')) || other.error) chunk.forEach((u) => shared.add(u)); // ragu -> jangan hapus
+    }
+    const paths = list.filter((u) => !shared.has(u)).map(storagePathFromUrl).filter(Boolean);
+    const { count: messageCount } = await supabase.from('messages').select('id', { count: 'exact', head: true }).eq('conversation_id', id);
+    const { error: msgErr } = await supabase.from('messages').delete().eq('conversation_id', id);
+    if (msgErr) throw msgErr;
+    // Data turunan chat (tabel opsional: abaikan bila belum ada)
+    for (const t of ['conversation_tags', 'conversation_tag_events', 'followup_tasks', 'followup_sequences', 'ai_team_requests']) {
+      await supabase.from(t).delete().eq('conversation_id', id).then(() => {}, () => {});
+    }
     const { error } = await supabase.from('conversations').delete().eq('id', id);
     if (error) throw error;
-    res.json({ success: true });
+
+    // File media dihapus SETELAH data terhapus (bila gagal, hanya sisa file di storage)
+    let mediaDeleted = 0;
+    for (let i = 0; i < paths.length; i += 500) {
+      const batch = paths.slice(i, i + 500);
+      const { error } = await supabase.storage.from('wa-media').remove(batch);
+      if (error) console.warn('[DeleteChat] hapus media gagal:', error.message);
+      else mediaDeleted += batch.length;
+    }
+
+    broadcast('conversation_updated', { conversationId: id, deleted: true }).catch(() => {});
+    console.log(`[DeleteChat] conv=${id} dihapus oleh ${req.user?.name || req.user?.id}: ${messageCount ?? '?'} pesan, ${mediaDeleted} file media`);
+    res.json({ success: true, messages: messageCount ?? null, media: mediaDeleted });
   } catch (err) {
     console.error('DELETE /conversations/:id error:', err);
     res.status(500).json({ error: err.message });
