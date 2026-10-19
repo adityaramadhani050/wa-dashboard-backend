@@ -4,6 +4,7 @@ import multer from 'multer';
 import { getSock, broadcast, bumpConvOutgoing } from '../baileys/connection.js';
 import { supabase } from '../db/supabase.js';
 import { compressImage, makeThumbnail } from '../utils/media.js';
+import { sendOwned } from '../utils/waSend.js';
 
 const router = Router();
 const upload = multer({
@@ -56,7 +57,9 @@ router.post('/send', async (req, res) => {
     }
     if (!jid) return res.status(400).json({ error: 'Could not resolve WhatsApp JID' });
 
-    await sock.sendMessage(jid, { text: message });
+    // Dengan conversation_id baris disimpan di sini; tanpa itu (mis. notifikasi ERP) biar disimpan dari echo WA
+    if (conversation_id) await sendOwned(sock, jid, { text: message });
+    else await sock.sendMessage(jid, { text: message });
 
     if (conversation_id) {
       const { data: saved, error } = await supabase
@@ -118,7 +121,7 @@ router.post('/send-media', upload.single('file'), async (req, res) => {
       baileysMsg = { document: buffer, fileName, mimetype: fileMime, caption: caption_ };
     }
 
-    const sentResult = await sock.sendMessage(jid, baileysMsg, buildQuotedOpts(jid, replyTo));
+    const sentResult = await sendOwned(sock, jid, baileysMsg, buildQuotedOpts(jid, replyTo));
     const waMessageId = sentResult?.key?.id || null;
 
     let mediaUrl = null;
@@ -310,7 +313,7 @@ router.post('/forward', async (req, res) => {
       baileysMsg = { text: msg.body };
     }
 
-    const sentResult = await sock.sendMessage(jid, baileysMsg);
+    const sentResult = await sendOwned(sock, jid, baileysMsg);
     const waMessageId = sentResult?.key?.id || null;
 
     const { data: saved, error } = await supabase
@@ -462,7 +465,7 @@ router.post('/send-quick-media', async (req, res) => {
       };
     }
 
-    const sentResult = await sock.sendMessage(jid, baileysMsg, buildQuotedOpts(jid, replyTo));
+    const sentResult = await sendOwned(sock, jid, baileysMsg, buildQuotedOpts(jid, replyTo));
     const waMessageId = sentResult?.key?.id || null;
 
     const { data: saved, error } = await supabase
@@ -519,7 +522,7 @@ router.post('/send-location', async (req, res) => {
     const jid = await resolveJid(conversation_id);
     if (!jid) return res.status(404).json({ error: 'Percakapan tidak ditemukan' });
 
-    const sent = await sock.sendMessage(jid, {
+    const sent = await sendOwned(sock, jid, {
       location: { degreesLatitude: lat, degreesLongitude: lng, name: name || undefined, address: address || undefined },
     });
     const place = name || address || 'Lokasi';
@@ -564,7 +567,7 @@ router.post('/send-contact', async (req, res) => {
       `TEL;type=CELL;type=VOICE;waid=${digits}:+${digits}\n` +
       'END:VCARD';
 
-    const sent = await sock.sendMessage(jid, { contacts: { displayName, contacts: [{ vcard }] } });
+    const sent = await sendOwned(sock, jid, { contacts: { displayName, contacts: [{ vcard }] } });
     const body = `📇 ${displayName} — +${digits}`;
 
     const { data: saved, error } = await supabase.from('messages').insert({

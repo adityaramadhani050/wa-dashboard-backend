@@ -6,6 +6,7 @@ import { setRegionManually } from '../services/regionalBot.js';
 import { onTagsChanged as onFollowupTagsChanged } from '../services/followup.js';
 import { waitSessions, workMinutes, getWorkHours, KPI_MINUTES } from './stats.js';
 import { getAiSalesConfig, scheduleAiReply } from '../services/aiSales.js';
+import { sendOwned } from '../utils/waSend.js';
 
 const router = Router();
 
@@ -311,7 +312,7 @@ router.post('/:id/messages', async (req, res) => {
       };
     }
 
-    const sentResult = await sock.sendMessage(jid, { text: message }, sendOpts);
+    const sentResult = await sendOwned(sock, jid, { text: message }, sendOpts);
     const waMessageId = sentResult?.key?.id || null;
     const tWa = Date.now();
 

@@ -12,6 +12,7 @@
 
 import { supabase } from '../db/supabase.js';
 import { getSock, bumpConvOutgoing, broadcast } from '../baileys/connection.js';
+import { sendOwned } from '../utils/waSend.js';
 
 const MIN_DELAY_MS = 8_000;   // jeda minimum antar pesan
 const MAX_DELAY_MS = 25_000;  // jeda maksimum antar pesan
@@ -202,7 +203,10 @@ async function tick() {
   try {
     const built = await buildBaileysMsg(campaign, recipient.name);
     if (!built) throw new Error('quick_media tidak ditemukan');
-    const sent = await sock.sendMessage(recipient.wa_jid, built.msg);
+    // Dengan conversation_id baris disimpan di bawah -> cegah echo tersimpan dobel
+    const sent = recipient.conversation_id
+      ? await sendOwned(sock, recipient.wa_jid, built.msg)
+      : await sock.sendMessage(recipient.wa_jid, built.msg);
     const waMessageId = sent?.key?.id || null;
     const nowIso = new Date().toISOString();
     const qm = built.qm;
