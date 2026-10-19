@@ -92,3 +92,15 @@ export async function requireAdmin(req, res, next) {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Akses khusus admin.' });
   next();
 }
+
+// Seperti requireAdmin, tapi SELALU ditegakkan (walau AUTH_ENFORCED belum aktif):
+// dipakai untuk aksi yang memang tidak boleh dilakukan agent (mis. label percakapan).
+export async function requireAdminStrict(req, res, next) {
+  if (!req.user) {
+    const payload = readToken(req);
+    if (payload && (await tokenNotRevoked(payload))) req.user = payload;
+  }
+  if (!req.user) return res.status(401).json({ error: 'Tidak terautentikasi.' });
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Hanya admin yang dapat mengatur label percakapan.' });
+  next();
+}

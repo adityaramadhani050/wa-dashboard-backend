@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { supabase } from '../db/supabase.js';
 import { getSock, broadcast, bumpConvOutgoing } from '../baileys/connection.js';
-import { requireAdmin } from '../middleware/auth.js';
+import { requireAdmin, requireAdminStrict } from '../middleware/auth.js';
 import { setRegionManually } from '../services/regionalBot.js';
 import { onTagsChanged as onFollowupTagsChanged } from '../services/followup.js';
 import { waitSessions, workMinutes, getWorkHours, KPI_MINUTES } from './stats.js';
@@ -400,7 +400,8 @@ router.post('/:id/messages', async (req, res) => {
   }
 });
 
-router.post('/:id/tags', async (req, res) => {
+// Pasang/lepas label percakapan: khusus admin (agent hanya melihat)
+router.post('/:id/tags', requireAdminStrict, async (req, res) => {
   try {
     const { id } = req.params;
     const { tag_id } = req.body;
@@ -439,7 +440,7 @@ router.post('/:id/tags', async (req, res) => {
   }
 });
 
-router.delete('/:id/tags/:tagId', async (req, res) => {
+router.delete('/:id/tags/:tagId', requireAdminStrict, async (req, res) => {
   try {
     const { id, tagId } = req.params;
     const { error } = await supabase

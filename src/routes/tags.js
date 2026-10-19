@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { requireAdmin, requireAdminStrict } from '../middleware/auth.js';
 import { supabase } from '../db/supabase.js';
 
 const router = Router();
@@ -20,7 +21,8 @@ router.get('/', async (req, res) => {
 });
 
 // Create tag
-router.post('/', async (req, res) => {
+// Kelola label percakapan: khusus admin
+router.post('/', requireAdminStrict, async (req, res) => {
   try {
     const { name, color } = req.body;
     if (!name) {
@@ -45,7 +47,7 @@ router.post('/', async (req, res) => {
 });
 
 // Update tag
-router.put('/:id', async (req, res) => {
+router.put('/:id', requireAdminStrict, async (req, res) => {
   try {
     const { id } = req.params;
     const { name, color } = req.body;
@@ -75,7 +77,7 @@ router.put('/:id', async (req, res) => {
 });
 
 // Delete tag
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', requireAdminStrict, async (req, res) => {
   try {
     const { id } = req.params;
     const { error } = await supabase.from('tags').delete().eq('id', id);
