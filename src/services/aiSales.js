@@ -159,14 +159,18 @@ async function processConversation(conversationId, { force = false } = {}) {
     // Deal / Non-Client ditangani admin
     if (tagNames.some((n) => /\bdeal\b/i.test(n) || /non[\s_-]*client/i.test(n))) return;
 
-    const msgs = await fetchRecentMessages(conversationId);
+    const all = await fetchRecentMessages(conversationId);
+    // Pesan bot otomatis (mis. bot lokasi: "mohon tunggu, dibantu kak Rena") di
+    // ujung riwayat bukan balasan sales -> pesan customer sebelumnya tetap menunggu.
+    const msgs = withoutTrailingBot(all);
+    const botHandoff = msgs.length < all.length;
     const last = msgs[msgs.length - 1];
     if (!last || last.from_me) return; // tidak ada pesan customer yang menunggu
     if (skipped.get(conversationId) === last.timestamp) return; // sudah diputuskan tidak dibalas
 
     // Ada manusia (admin/agent) yang membalas setelah balasan AI terakhir & masih
     // baru -> admin sedang menangani, AI tidak ikut campur. (Butuh kolom sent_by_ai.)
-    if (!force && humanActive(msgs)) return;
+    if (!force && humanActive(msgs, conversationId)) return;
 
     const dayKey = `${conversationId}|${wibDate()}`;
     if ((dailyCount.get(dayKey) || 0) >= MAX_REPLIES_PER_DAY) {
@@ -185,7 +189,11 @@ async function processConversation(conversationId, { force = false } = {}) {
 
     // Follow-up AI terakhir yang kini dibalas customer -> AI ikut menilai hasilnya
     const fuTask = await pendingAiFollowupOutcome(conversationId, cfg.agent_id, last.timestamp);
-    const plan = await generateReply({ conversationId, contactId: conv.contact?.id, waName: conv.contact?.name, msgs, cfg, persona, fuTask });
+    const plan = await generateReply({
+      conversationId, contactId: conv.contact?.id, waName: conv.contact?.name, msgs: all, cfg, persona, fuTask,
+      feature: 'ai_sales_reply',
+      task: botHandoff ? 'Bot otomatis kami baru saja menyapa customer & menyerahkan chat ke kamu. Lanjutkan sebagai sales yang baru bergabung: perkenalkan diri singkat, lalu tanggapi pesan/pertanyaan customer yang belum dijawab. Jangan mengulang pertanyaan yang sudah dijawab customer (mis. kota).' : '',
+    });
     if (!plan) return;
     if (plan.followup_outcome && fuTask) {
       await applyAiOutcome(fuTask.id, plan.followup_outcome, plan.objection_category).catch(() => {});
@@ -199,7 +207,7 @@ async function processConversation(conversationId, { force = false } = {}) {
     }
 
     // Pesan baru masuk selagi AI berpikir -> jadwalkan ulang agar ikut terjawab
-    const latest = await fetchRecentMessages(conversationId);
+    const latest = withoutTrailingBot(await fetchRecentMessages(conversationId));
     const newest = latest[latest.length - 1];
     if (newest && newest.timestamp !== last.timestamp) {
       if (!newest.from_me) scheduleAiReply(conversationId, 2000);
@@ -222,11 +230,31 @@ async function processConversation(conversationId, { force = false } = {}) {
 }
 
 // Manusia (admin/agent) membalas setelah balasan AI terakhir & masih baru?
-function humanActive(msgs) {
+// (Balasan manusia sebelum admin menekan "Lanjutkan AI" tidak dihitung.)
+const resumedAt = new Map(); // conversationId -> ms
+function humanActive(msgs, conversationId = null) {
   let lastAi = -1;
   msgs.forEach((m, i) => { if (m.sent_by_ai) lastAi = i; });
+  const since = conversationId ? resumedAt.get(String(conversationId)) || 0 : 0;
   return msgs.slice(lastAi + 1).some((m) => m.from_me && !m.sent_by_bot && m.sent_by_ai === false
+    && new Date(m.timestamp).getTime() > since
     && Date.now() - new Date(m.timestamp).getTime() < HUMAN_ACTIVE_MS);
+}
+
+// Buang pesan bot otomatis di ujung riwayat.
+function withoutTrailingBot(msgs) {
+  let n = msgs.length;
+  while (n > 0 && msgs[n - 1].from_me && msgs[n - 1].sent_by_bot) n--;
+  return n === msgs.length ? msgs : msgs.slice(0, n);
+}
+
+// Tombol "Lanjutkan AI": AI kembali aktif di chat ini (abaikan jeda karena
+// balasan manual sebelumnya) & langsung membalas pesan customer yang menunggu.
+export async function resumeAi(conversationId) {
+  resumedAt.set(String(conversationId), Date.now());
+  setTimeout(() => resumedAt.delete(String(conversationId)), HUMAN_ACTIVE_MS + 60000);
+  skipped.delete(conversationId);
+  await scheduleAiReply(conversationId, 800, { force: true });
 }
 
 // Tugas AI di luar alur balasan biasa (mis. meneruskan jawaban Tanya Tim).
@@ -244,7 +272,7 @@ export async function runAiTask(conversationId, task, { fixedMessages = null, fe
       .eq('id', conversationId).maybeSingle();
     if (!conv || String(conv.assigned_to) !== String(cfg.agent_id)) return { sent: false, reason: 'not_ai' };
     const msgs = await fetchRecentMessages(conversationId);
-    if (humanActive(msgs)) return { sent: false, reason: 'human_active' };
+    if (humanActive(msgs, conversationId)) return { sent: false, reason: 'human_active' };
     const jid = conv.wa_jid || (conv.contact?.phone ? `${String(conv.contact.phone).split('@')[0]}@s.whatsapp.net` : null);
     if (!jid) return { sent: false, reason: 'no_jid' };
     const { data: agent } = await supabase.from('agents').select('name').eq('id', cfg.agent_id).maybeSingle();
@@ -276,7 +304,7 @@ const MEDIA_LABEL = { image: 'gambar', video: 'video', audio: 'pesan suara', doc
 
 function historyText(msgs, persona) {
   return msgs.map((m) => {
-    const who = m.from_me ? persona : 'Customer';
+    const who = m.from_me ? (m.sent_by_bot ? 'Bot otomatis' : persona) : 'Customer';
     let body = (m.body || '').trim();
     if (m.media_type && (!body || /^\[.*\]$/.test(body))) body = `[mengirim ${MEDIA_LABEL[m.media_type] || 'media'}]`;
     return `${who}: ${body || '[pesan kosong]'}`;

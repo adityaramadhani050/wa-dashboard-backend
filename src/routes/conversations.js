@@ -5,7 +5,7 @@ import { requireAdmin, requireAdminStrict } from '../middleware/auth.js';
 import { setRegionManually } from '../services/regionalBot.js';
 import { onTagsChanged as onFollowupTagsChanged } from '../services/followup.js';
 import { waitSessions, workMinutes, getWorkHours, KPI_MINUTES } from './stats.js';
-import { getAiSalesConfig, scheduleAiReply } from '../services/aiSales.js';
+import { getAiSalesConfig, scheduleAiReply, resumeAi } from '../services/aiSales.js';
 import { sendOwned } from '../utils/waSend.js';
 import { storagePathFromUrl } from '../services/mediaTtl.js';
 
@@ -213,6 +213,23 @@ router.delete('/:id', requireAdmin, async (req, res) => {
     res.json({ success: true, messages: messageCount ?? null, media: mediaDeleted });
   } catch (err) {
     console.error('DELETE /conversations/:id error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Tombol "Lanjutkan AI": AI Sales kembali membalas chat ini sekarang juga,
+// mengabaikan jeda 30 menit akibat balasan manual sebelumnya.
+router.post('/:id/ai-resume', async (req, res) => {
+  try {
+    const cfg = await getAiSalesConfig();
+    if (!cfg.enabled || !cfg.agent_id) return res.status(400).json({ error: 'AI Sales belum aktif.' });
+    const { data: conv } = await supabase.from('conversations').select('assigned_to').eq('id', req.params.id).maybeSingle();
+    if (!conv) return res.status(404).json({ error: 'Chat tidak ditemukan' });
+    if (String(conv.assigned_to) !== String(cfg.agent_id)) return res.status(400).json({ error: 'Chat ini tidak di-assign ke AI Sales.' });
+    await resumeAi(req.params.id);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('POST /conversations/:id/ai-resume error:', err);
     res.status(500).json({ error: err.message });
   }
 });

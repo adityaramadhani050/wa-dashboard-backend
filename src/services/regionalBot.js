@@ -144,6 +144,9 @@ function emitConvUpdate(conversationId, patch) {
 
 async function announceAssignment(conversationId, agent) {
   if (agent) broadcast('conversation_assigned', { conversationId, agent }).catch(() => {});
+  // Diserahkan ke akun AI Sales -> AI langsung menyapa & menjawab pesan customer
+  // yang menunggu (tanpa menunggu customer mengirim pesan lagi).
+  if (agent) import('./aiSales.js').then((m) => m.onIncomingForAi(conversationId)).catch(() => {});
 }
 
 // Simpan lokasi ke kontak & percakapan.
