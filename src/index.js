@@ -41,6 +41,8 @@ import { startFollowupJob } from './services/followup.js'
 import { startAiSalesJob } from './services/aiSales.js'
 import { startAiTeamJob } from './services/aiTeam.js'
 import { subscriber, redisAvailable, INSTANCE_ID, REDIS_PREFIX } from './db/redis.js'
+import { setRealtimeIO, emitLocal, joinRooms } from './realtime.js'
+import { verifyTokenString } from './middleware/auth.js'
 
 // Cegah proses mati karena error async internal Baileys yang tidak bisa kita
 // tangkap (mis. "Connection Closed" saat Baileys mengirim retry-request untuk
@@ -74,6 +76,7 @@ const io = new Server(httpServer, {
 })
 
 setIO(io)
+setRealtimeIO(io)
 
 // Event realtime selalu di-emit langsung oleh instance yang membuatnya; Redis
 // (bila ada) hanya meneruskan ke instance lain. Pesan dari instance sendiri diabaikan.
@@ -86,7 +89,7 @@ if (redisAvailable && subscriber) {
     try {
       const msg = JSON.parse(raw)
       if (msg?.src === INSTANCE_ID) return
-      io.emit(channel.slice(REDIS_PREFIX.length), msg?.data ?? msg)
+      emitLocal(channel.slice(REDIS_PREFIX.length), msg?.data ?? msg).catch(() => {})
     } catch {}
   })
   console.log('[Redis] Pub/sub antar instance aktif')
@@ -94,8 +97,16 @@ if (redisAvailable && subscriber) {
   console.log('[Redis] Tidak dikonfigurasi — emit Socket.io langsung')
 }
 
+// Autentikasi socket: user dimasukkan ke room `admins` / `agent:<id>` sehingga
+// event per chat hanya sampai ke admin & agent pemegang chat (lihat realtime.js).
+io.use(async (socket, next) => {
+  socket.data.user = await verifyTokenString(socket.handshake.auth?.token).catch(() => null)
+  next()
+})
+
 // Heartbeat aplikasi: klien memastikan koneksinya benar-benar hidup (bukan "zombie")
 io.on('connection', (socket) => {
+  joinRooms(socket, socket.data.user)
   socket.on('hb', (ack) => { if (typeof ack === 'function') ack(Date.now()) })
 })
 
@@ -184,13 +195,15 @@ io.on('connection', (socket) => {
   socket.emit('wa_sync', { syncing: getSyncing() })
   // Kirim QR terbaru bila WA belum tersambung -> dashboard yang baru buka
   // halaman QR langsung dapat QR tanpa menunggu refresh berikutnya.
+  // QR WhatsApp hanya untuk admin
+  const isAdmin = socket.data.user?.role === 'admin'
   const qr = getLatestQr()
-  if (qr) socket.emit('qr', qr)
+  if (qr && isAdmin) socket.emit('qr', qr)
   // Dashboard membuka halaman QR -> minta QR terbaru
   socket.on('request_qr', () => {
     const cur = getLatestQr()
     socket.emit('wa_status', { connected: getIsConnected() })
-    if (cur) socket.emit('qr', cur)
+    if (cur && isAdmin) socket.emit('qr', cur)
   })
   socket.on('disconnect', () => {
     console.log('Dashboard client disconnected:', socket.id)

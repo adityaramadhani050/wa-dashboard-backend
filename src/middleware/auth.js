@@ -70,6 +70,15 @@ async function tokenNotRevoked(payload) {
   return payload.iat >= changed - 5; // toleransi 5 dtk clock skew
 }
 
+// Token dari koneksi Socket.io (handshake auth). Kembalikan payload user atau null.
+export async function verifyTokenString(token) {
+  if (!token) return null;
+  try {
+    const payload = jwt.verify(String(token), JWT_SECRET);
+    return (await tokenNotRevoked(payload)) ? payload : null;
+  } catch { return null; }
+}
+
 // Verifikasi token & isi req.user. Memblokir hanya bila AUTH_ENFORCED=true.
 export async function requireAuth(req, res, next) {
   const payload = readToken(req);

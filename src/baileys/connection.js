@@ -17,6 +17,7 @@ import { routeIncoming, isBotMessageId } from '../services/regionalBot.js'
 import { pauseOnCustomerReply } from '../services/followup.js'
 import { onIncomingForAi } from '../services/aiSales.js'
 import { isTeamPhone, isTeamWaId, handleTeamMessage } from '../services/aiTeam.js'
+import { emitLocal } from '../realtime.js'
 import { compressImage, makeThumbnail } from '../utils/media.js'
 import QRCode from 'qrcode'
 import fs from 'fs/promises'
@@ -103,7 +104,7 @@ export async function bumpConvOutgoing(conversationId, body) {
 // Broadcast event ke semua dashboard (Redis pub/sub + fallback Socket.io langsung)
 export async function broadcast(channel, data) {
   const published = await publish(channel, data)
-  if (!published) ioInstance?.emit(channel, data)
+  if (!published) await emitLocal(channel, data)
 }
 
 async function clearAuthFolder() {
@@ -529,7 +530,7 @@ async function persistMessage(msg, { isLive }) {
       if (updated) {
         const p = { message: updated, conversationId: updated.conversation_id }
         const pub = await publish('message_updated', p)
-        if (!pub) ioInstance?.emit('message_updated', p)
+        if (!pub) await emitLocal('message_updated', p)
       }
     }
     return
@@ -568,7 +569,7 @@ async function persistMessage(msg, { isLive }) {
     if (!res.error && res.data) {
       const p = { message: res.data, conversationId: res.data.conversation_id }
       const pub = await publish('message_updated', p)
-      if (!pub) ioInstance?.emit('message_updated', p)
+      if (!pub) await emitLocal('message_updated', p)
     }
     return
   }
@@ -697,7 +698,7 @@ async function persistMessage(msg, { isLive }) {
     payload.assignedTo = convRow?.assigned_to || null
   }
   const published = await publish('new_message', payload)
-  if (!published) ioInstance?.emit('new_message', payload)
+  if (!published) await emitLocal('new_message', payload)
   console.log(`[Recv${isLive ? '' : '/sync'}] ${fromMe ? 'out' : 'in '} conv=${conversationId} db=${tDb - tStart}ms${mediaInfo ? ` media=${mediaInfo.type}(bg)` : ''}`)
 
   // Denormalisasi ringkasan percakapan (mempercepat daftar chat -> 1 query).
@@ -797,7 +798,7 @@ async function persistMessage(msg, { isLive }) {
         const baseMsg = updated || { ...savedMessage, media_url: mediaUrl }
         const upPayload = { message: { ...baseMsg, media_thumb_url: thumbUrl || baseMsg.media_thumb_url || null }, conversationId, contactId }
         const pub2 = await publish('message_updated', upPayload)
-        if (!pub2) ioInstance?.emit('message_updated', upPayload)
+        if (!pub2) await emitLocal('message_updated', upPayload)
       } catch (err) {
         console.warn('[Media] Background download/upload failed:', err.message)
       }
@@ -883,7 +884,7 @@ export async function connectToWhatsApp() {
     if (qr) {
       try {
         latestQr = await QRCode.toDataURL(qr)
-        ioInstance?.emit('qr', latestQr)
+        emitLocal('qr', latestQr).catch(() => {})
       } catch (err) {
         console.error('QR generation error:', err)
       }
@@ -972,7 +973,7 @@ export async function connectToWhatsApp() {
             status,
           }
           const published = await publish('message_status', payload)
-          if (!published) ioInstance?.emit('message_status', payload)
+          if (!published) await emitLocal('message_status', payload)
         }
       } catch (err) {
         console.warn('[Receipt] Update error:', err.message)

@@ -5,6 +5,7 @@ import { getSock, broadcast, bumpConvOutgoing } from '../baileys/connection.js';
 import { supabase } from '../db/supabase.js';
 import { compressImage, makeThumbnail } from '../utils/media.js';
 import { sendOwned } from '../utils/waSend.js';
+import { guardConversation } from '../services/access.js';
 
 const router = Router();
 const upload = multer({
@@ -43,6 +44,8 @@ router.post('/send', async (req, res) => {
 
     if (!message) return res.status(400).json({ error: 'message is required' });
     if (!phone && !conversation_id) return res.status(400).json({ error: 'phone or conversation_id is required' });
+    if (!(await guardConversation(req, res, conversation_id))) return;
+
 
     const sock = getSock();
     if (!sock) return res.status(503).json({ error: 'WhatsApp is not connected yet' });
@@ -89,6 +92,7 @@ router.post('/send-media', upload.single('file'), async (req, res) => {
     const sock = getSock();
     if (!sock) return res.status(503).json({ error: 'WhatsApp is not connected yet' });
 
+    if (!(await guardConversation(req, res, conversation_id))) return;
     const { data: conv } = await supabase
       .from('conversations').select('wa_jid').eq('id', conversation_id).single();
     if (!conv?.wa_jid) return res.status(404).json({ error: 'Conversation not found or no JID' });
@@ -201,6 +205,7 @@ router.patch('/:id/edit', async (req, res) => {
       .single();
     if (!msg) return res.status(404).json({ error: 'Pesan tidak ditemukan' });
     if (!msg.from_me) return res.status(403).json({ error: 'Hanya pesan sendiri yang bisa diedit' });
+    if (!(await guardConversation(req, res, msg.conversation_id))) return;
     if (msg.media_type) return res.status(400).json({ error: 'Pesan media tidak bisa diedit' });
     if (!msg.wa_message_id) return res.status(400).json({ error: 'Pesan ini tidak bisa diedit' });
     const ageMs = Date.now() - new Date(msg.timestamp).getTime();
@@ -249,6 +254,7 @@ router.delete('/:id', async (req, res) => {
       .eq('id', id)
       .single();
     if (!msg) return res.status(404).json({ error: 'Pesan tidak ditemukan' });
+    if (!(await guardConversation(req, res, msg.conversation_id))) return;
 
     // Hapus di WhatsApp (delete for everyone) hanya untuk pesan keluar milik kita
     if (msg.from_me && msg.wa_message_id) {
@@ -284,6 +290,7 @@ router.post('/forward', async (req, res) => {
     if (!message_id || !target_conversation_id) {
       return res.status(400).json({ error: 'message_id dan target_conversation_id wajib diisi' });
     }
+    if (!(await guardConversation(req, res, target_conversation_id))) return;
 
     const sock = getSock();
     if (!sock) return res.status(503).json({ error: 'WhatsApp is not connected yet' });
@@ -416,6 +423,7 @@ router.post('/send-quick-media', async (req, res) => {
     const replyTo = parseReplyTo(req.body.reply_to);
     if (!conversation_id) return res.status(400).json({ error: 'conversation_id is required' });
     if (!quick_media_id) return res.status(400).json({ error: 'quick_media_id is required' });
+    if (!(await guardConversation(req, res, conversation_id))) return;
 
     const sock = getSock();
     if (!sock) return res.status(503).json({ error: 'WhatsApp is not connected yet' });
@@ -514,6 +522,7 @@ router.post('/send-location', async (req, res) => {
   try {
     const { conversation_id, latitude, longitude, name, address } = req.body;
     if (!conversation_id) return res.status(400).json({ error: 'conversation_id wajib diisi' });
+    if (!(await guardConversation(req, res, conversation_id))) return;
     const lat = Number(latitude), lng = Number(longitude);
     if (Number.isNaN(lat) || Number.isNaN(lng)) return res.status(400).json({ error: 'Koordinat tidak valid' });
 
@@ -551,6 +560,7 @@ router.post('/send-contact', async (req, res) => {
   try {
     const { conversation_id, name, phone } = req.body;
     if (!conversation_id) return res.status(400).json({ error: 'conversation_id wajib diisi' });
+    if (!(await guardConversation(req, res, conversation_id))) return;
     const displayName = String(name || '').trim();
     const digits = String(phone || '').replace(/\D/g, '');
     if (!displayName || !digits) return res.status(400).json({ error: 'Nama & nomor wajib diisi' });

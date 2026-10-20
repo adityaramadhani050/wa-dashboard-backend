@@ -8,6 +8,7 @@ import { waitSessions, workMinutes, getWorkHours, KPI_MINUTES } from './stats.js
 import { getAiSalesConfig, scheduleAiReply, resumeAi } from '../services/aiSales.js';
 import { sendOwned } from '../utils/waSend.js';
 import { storagePathFromUrl } from '../services/mediaTtl.js';
+import { guardConversation } from '../services/access.js';
 
 const router = Router();
 
@@ -81,6 +82,7 @@ router.get('/', async (req, res) => {
 
 router.get('/:id', async (req, res) => {
   try {
+    if (!(await guardConversation(req, res, req.params.id))) return;
     const { id } = req.params;
 
     const build = (contactCols) => supabase
@@ -111,6 +113,7 @@ router.get('/:id', async (req, res) => {
 
 router.get('/:id/messages', async (req, res) => {
   try {
+    if (!(await guardConversation(req, res, req.params.id))) return;
     const { id } = req.params;
     const limit = Math.min(parseInt(req.query.limit, 10) || 0, 200);
     const before = req.query.before; // timestamp ISO -> muat pesan LEBIH LAMA dari ini
@@ -159,7 +162,7 @@ router.get('/:id/messages', async (req, res) => {
 router.delete('/:id', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { data: conv } = await supabase.from('conversations').select('id').eq('id', id).maybeSingle();
+    const { data: conv } = await supabase.from('conversations').select('id, assigned_to').eq('id', id).maybeSingle();
     if (!conv) return res.status(404).json({ error: 'Chat tidak ditemukan' });
 
     // File media pesan (best-effort; kegagalan storage tidak membatalkan hapus chat).
@@ -208,7 +211,7 @@ router.delete('/:id', requireAdmin, async (req, res) => {
       else mediaDeleted += batch.length;
     }
 
-    broadcast('conversation_updated', { conversationId: id, deleted: true }).catch(() => {});
+    broadcast('conversation_updated', { conversationId: id, deleted: true, assignedTo: conv.assigned_to || null }).catch(() => {});
     console.log(`[DeleteChat] conv=${id} dihapus oleh ${req.user?.name || req.user?.id}: ${messageCount ?? '?'} pesan, ${mediaDeleted} file media`);
     res.json({ success: true, messages: messageCount ?? null, media: mediaDeleted });
   } catch (err) {
@@ -221,6 +224,7 @@ router.delete('/:id', requireAdmin, async (req, res) => {
 // mengabaikan jeda 30 menit akibat balasan manual sebelumnya.
 router.post('/:id/ai-resume', async (req, res) => {
   try {
+    if (!(await guardConversation(req, res, req.params.id))) return;
     const cfg = await getAiSalesConfig();
     if (!cfg.enabled || !cfg.agent_id) return res.status(400).json({ error: 'AI Sales belum aktif.' });
     const { data: conv } = await supabase.from('conversations').select('assigned_to').eq('id', req.params.id).maybeSingle();
@@ -239,6 +243,7 @@ router.post('/:id/assign', async (req, res) => {
     const { id } = req.params;
     const { agent_id } = req.body;
     if (!agent_id) return res.status(400).json({ error: 'agent_id is required' });
+    const { data: before } = await supabase.from('conversations').select('assigned_to').eq('id', id).maybeSingle();
 
     // Di-assign ke agent -> chat jadi "Aktif" (kecuali sudah resolved tetap dihormati?
     // tetap set in_progress karena agent kini menangani).
@@ -265,6 +270,7 @@ router.post('/:id/assign', async (req, res) => {
       broadcast('conversation_assigned', {
         conversationId: id,
         agent: { id: data.agents.id, name: data.agents.name },
+        prevAgentId: before?.assigned_to || null, // agent lama: chat hilang dari daftarnya
       }).catch(() => {});
     }
 
@@ -278,6 +284,7 @@ router.post('/:id/assign', async (req, res) => {
 router.post('/:id/unassign', async (req, res) => {
   try {
     const { id } = req.params;
+    const { data: before } = await supabase.from('conversations').select('assigned_to').eq('id', id).maybeSingle();
     const { data, error } = await supabase
       .from('conversations')
       .update({ assigned_to: null, updated_at: new Date().toISOString() })
@@ -293,7 +300,7 @@ router.post('/:id/unassign', async (req, res) => {
       .eq('status', 'in_progress');
 
     // Broadcast unassign (agent: null) supaya badge hilang realtime di semua dashboard
-    broadcast('conversation_assigned', { conversationId: id, agent: null }).catch(() => {});
+    broadcast('conversation_assigned', { conversationId: id, agent: null, prevAgentId: before?.assigned_to || null }).catch(() => {});
 
     res.json(data);
   } catch (err) {
@@ -304,6 +311,7 @@ router.post('/:id/unassign', async (req, res) => {
 
 router.patch('/:id/status', async (req, res) => {
   try {
+    if (!(await guardConversation(req, res, req.params.id))) return;
     const { id } = req.params;
     const { status } = req.body;
     const validStatuses = ['open', 'in_progress', 'resolved'];
@@ -342,6 +350,7 @@ router.patch('/:id/region', requireAdmin, async (req, res) => {
 
 router.post('/:id/messages', async (req, res) => {
   try {
+    if (!(await guardConversation(req, res, req.params.id))) return;
     const { id } = req.params;
     const { message, reply_to } = req.body;
     if (!message) return res.status(400).json({ error: 'message is required' });
@@ -478,6 +487,7 @@ router.delete('/:id/tags/:tagId', requireAdminStrict, async (req, res) => {
 // Rata-rata waktu respons agent di satu chat (semua balasan, jam kerja bila aktif).
 router.get('/:id/response-stats', async (req, res) => {
   try {
+    if (!(await guardConversation(req, res, req.params.id))) return;
     const run = (cols) => {
       const all = [];
       const page = async (from) => {
