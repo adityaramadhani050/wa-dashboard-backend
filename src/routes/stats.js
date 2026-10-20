@@ -422,19 +422,26 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
   return { summary, agents, kpi, funnel, daily: Object.values(days) };
 }
 
-// Cache singkat: halaman Analytics memanggil beberapa endpoint sekaligus dengan
-// parameter sama -> dihitung sekali.
+// Cache: halaman Analytics memanggil beberapa endpoint sekaligus dengan parameter
+// sama -> dihitung sekali. Periode yang mencakup hari ini disimpan 20 detik;
+// periode yang sudah lewat (datanya nyaris tidak berubah) disimpan 10 menit agar
+// rentang panjang tidak dihitung ulang setiap kali dibuka. Angka tetap sama
+// persis dengan perhitungan langsung. ?fresh=1 memaksa hitung ulang.
 const cache = new Map();
+const LIVE_TTL = 20000;
+const PAST_TTL = 10 * 60 * 1000;
 function getAnalytics(query) {
   const range = parseRange(query);
   const region = REGIONS.includes(query.region) ? query.region : null;
   const key = `${range.fromStr}|${range.toStr}|${region || ''}`;
   const now = Date.now();
-  for (const [k, v] of cache) if (now - v.at > 20000) cache.delete(k);
+  for (const [k, v] of cache) if (now - v.at > v.ttl) cache.delete(k);
   const hit = cache.get(key);
-  if (hit) return hit.promise;
+  if (hit && query.fresh !== '1') return hit.promise;
+  // Periode lampau: berakhir lebih dari 1 jam lalu (sesi balasan lintas tengah malam sudah tuntas)
+  const ttl = range.toMs <= now - 3600000 ? PAST_TTL : LIVE_TTL;
   const promise = buildAnalytics(range, region);
-  cache.set(key, { at: now, promise });
+  cache.set(key, { at: now, ttl, promise });
   promise.catch(() => cache.delete(key));
   return promise;
 }
