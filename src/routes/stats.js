@@ -152,6 +152,7 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
     fetchAgents(),
     supabase.from('tags').select('id, name'),
     fetchAllCols([
+      'id, contact_id, assigned_to, status, region, wa_jid, updated_at, resolved_at, last_from_me, last_message_at, contact:contacts (created_at, region, name, phone, first_seen)',
       'id, contact_id, assigned_to, status, region, wa_jid, updated_at, resolved_at, last_from_me, contact:contacts (created_at, region)',
       'id, contact_id, assigned_to, status, region, wa_jid, updated_at, last_from_me, contact:contacts (created_at, region)',
       'id, contact_id, assigned_to, status, region, wa_jid, updated_at, contact:contacts (created_at, region)',
@@ -270,6 +271,8 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
   let kpiTotal = 0, kpiMet = 0, unreplied = 0;
   const seenContacts = new Set();
   const seenLeadContacts = new Set();
+  // Rincian chat per agent (accordion "Detail per Agent"): chat yang terhitung Total Lead
+  const agentChats = {}; // agentId -> [detail]
 
   for (const c of convs) {
     if ((c.wa_jid || '').endsWith('@g.us')) continue; // grup
@@ -282,6 +285,7 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
     const status = c.status || 'open';
     const isActiveNow = status === 'open' || status === 'in_progress';
     const add = (k) => { summary[k]++; if (row) row[k]++; };
+    let detail = null;
 
     if (!seenContacts.has(contactKey)) { seenContacts.add(contactKey); if (!nc) summary.total_contacts++; }
 
@@ -340,9 +344,28 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
         if (live && isActiveNow && c.last_from_me === false) add('awaiting');
 
         const deal = first('deal', fromMs) <= endMs;
+        const prospek = first('prospek') <= endMs || deal;
+        const fail = first('fail', fromMs) <= endMs;
         if (deal) add('deal');
-        if (first('prospek') <= endMs || deal) add('prospek');
-        if (first('fail', fromMs) <= endMs) add('fail');
+        if (prospek) add('prospek');
+        if (fail) add('fail');
+
+        if (row) {
+          detail = {
+            id: c.id,
+            name: c.contact?.name || c.contact?.phone || null,
+            phone: c.contact?.phone || null,
+            kind: kind === 'new_contacts' ? 'new' : 'old',
+            status: resolved ? 'resolved' : 'active',
+            awaiting: !!(live && isActiveNow && c.last_from_me === false),
+            stages: { prospek, deal, fail },
+            firstChat: c.contact?.first_seen || c.contact?.created_at || null,
+            lastChat: c.last_message_at || c.updated_at || null,
+            avgResponse: null,
+            replies: 0,
+          };
+          (agentChats[c.assigned_to] = agentChats[c.assigned_to] || []).push(detail);
+        }
       }
     }
 
@@ -367,6 +390,7 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
           kpiTotal++; ka.total++;
           if (ok) { kpiMet++; ka.met++; }
           if (row) { row.replies++; row.reply_msgs += times.length; if (ok) row.kpi_met++; row._times.push(...times); }
+          if (detail) { detail.avgResponse = Math.round(times.reduce((a, b) => a + b, 0) / times.length); detail.replies = times.length; }
         }
       }
     }
@@ -419,7 +443,7 @@ export async function buildAnalytics({ fromStr, toStr, fromMs, toMs }, region) {
   summary.tag_times = tagTimes;
   summary.tag_history = tagHistory;
 
-  return { summary, agents, kpi, funnel, daily: Object.values(days) };
+  return { summary, agents, kpi, funnel, daily: Object.values(days), agentChats };
 }
 
 // Cache: halaman Analytics memanggil beberapa endpoint sekaligus dengan parameter
@@ -472,6 +496,26 @@ router.get('/daily', handle('daily', (a, req) => {
 
 // Performa per agent dalam periode
 router.get('/agents', handle('agents', (a) => a.agents));
+
+// Rincian chat (Total Lead) seorang agent dalam periode + label yang menempel saat ini
+router.get('/agent-chats', async (req, res) => {
+  try {
+    const a = await getAnalytics(req.query);
+    const list = [...(a.agentChats?.[req.query.agent_id] || [])]
+      .sort((x, y) => (tsOf(y.lastChat) || 0) - (tsOf(x.lastChat) || 0));
+    const tagsBy = {};
+    const ids = list.map((d) => d.id);
+    for (let i = 0; i < ids.length; i += 150) {
+      const { data } = await supabase.from('conversation_tags')
+        .select('conversation_id, tags (id, name, color)').in('conversation_id', ids.slice(i, i + 150));
+      for (const r of data || []) if (r.tags) (tagsBy[r.conversation_id] = tagsBy[r.conversation_id] || []).push(r.tags);
+    }
+    res.json({ chats: list.map((d) => ({ ...d, tags: tagsBy[d.id] || [] })), kpiMinutes: KPI_MINUTES });
+  } catch (err) {
+    console.error('GET /stats/agent-chats error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // KPI respons: % chat yang rata-rata waktu balasannya <= 5 menit
 router.get('/response-kpi', handle('response-kpi', (a) => a.kpi));
