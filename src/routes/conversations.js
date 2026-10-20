@@ -22,58 +22,152 @@ const convSelect = (contactCols) => `
   agents:assigned_to (id, name, email, role)
 `;
 
+// Lampirkan tag & ringkasan (lastMessage, unread, ...) ke baris percakapan.
+async function enrichConversations(data) {
+  const conversationIds = data.map((conv) => conv.id);
+  const tagsByConversation = {};
+  // Ambil tag per-batch (mencegah URL kepanjangan / limit baris)
+  for (let i = 0; i < conversationIds.length; i += 150) {
+    const batch = conversationIds.slice(i, i + 150);
+    const { data: convTags } = await supabase
+      .from('conversation_tags')
+      .select('conversation_id, tags (id, name, color)')
+      .in('conversation_id', batch);
+    (convTags || []).forEach((ct) => {
+      if (!tagsByConversation[ct.conversation_id]) tagsByConversation[ct.conversation_id] = [];
+      if (ct.tags) tagsByConversation[ct.conversation_id].push(ct.tags);
+    });
+  }
+  // Ringkasan sudah didenormalisasi di baris conversations -> tanpa query per-chat.
+  return data.map((conv) => {
+    const lastFromMe = conv.last_from_me ?? null;
+    // Unread (boolean): pesan terakhir dari customer & lebih baru dari last_read_at
+    const unread = lastFromMe === false && !!conv.last_message_at &&
+      (!conv.last_read_at || new Date(conv.last_message_at) > new Date(conv.last_read_at));
+    const { conversation_tags: _ct, ...rest } = conv;
+    return {
+      ...rest,
+      lastMessage: conv.last_message || null,
+      lastMessageAt: conv.last_message_at || conv.updated_at,
+      lastFromMe,
+      awaitingSince: conv.awaiting_since || null,
+      tags: tagsByConversation[conv.id] || [],
+      unread,
+    };
+  });
+}
+
+const KPI_MS = 5 * 60 * 1000;
+const cleanQ = (q) => String(q || '').trim().slice(0, 60).replace(/[,()*%\\]/g, ' ').trim();
+const chatRegionOf = (c) => c.region || c.contact?.region || null;
+
+// Daftar chat.
+// - Mode halaman (dipakai daftar Chats): ?limit=100&cursor=<updated_at>&q=&tag=&reply=&status=&region=&agent_id=
+//   -> { items, nextCursor, hasMore, total, pinned }. pinned = chat menunggu balasan
+//   > 5 menit (disematkan di atas daftar) pada halaman pertama.
+// - ?ids=a,b -> chat tertentu (untuk chat baru yang belum termuat di daftar).
+// - Tanpa limit (ekspor, forward lama): seluruh chat, diambil per 1000 baris.
+// Agent selalu dibatasi ke chat miliknya sendiri.
 router.get('/', async (req, res) => {
   try {
-    const { agent_id } = req.query;
+    const agentId = req.user?.role === 'agent' ? req.user.id : (req.query.agent_id || null);
+    const limit = req.query.limit ? Math.min(200, Math.max(10, parseInt(req.query.limit, 10) || 100)) : null;
+    const ids = req.query.ids ? String(req.query.ids).split(',').map((x) => x.trim()).filter(Boolean).slice(0, 50) : null;
+    const q = cleanQ(req.query.q);
+    const tag = req.query.tag || null;
+    const reply = req.query.reply || null;      // unread | unreplied | replied
+    const status = req.query.status || null;    // open | in_progress | resolved
+    const region = req.query.region || null;    // barat | timur | unknown | bot
 
-    const build = (contactCols) => {
-      let q = supabase
-        .from('conversations')
-        .select(convSelect(contactCols))
-        .order('updated_at', { ascending: false });
-      if (agent_id) q = q.eq('assigned_to', agent_id);
-      return q;
-    };
-
-    let { data, error } = await build(CONTACT_COLS);
-    if (error) ({ data, error } = await build(CONTACT_COLS_BASE));
-    if (error) throw error;
-
-    const conversationIds = data.map((conv) => conv.id);
-    const tagsByConversation = {};
-    // Ambil tag per-batch (mencegah URL kepanjangan / limit baris saat percakapan
-    // banyak, mis. filter "Semua Agent" -> tanpa ini semua tag bisa hilang).
-    for (let i = 0; i < conversationIds.length; i += 150) {
-      const batch = conversationIds.slice(i, i + 150);
-      const { data: convTags } = await supabase
-        .from('conversation_tags')
-        .select('conversation_id, tags (id, name, color)')
-        .in('conversation_id', batch);
-
-      (convTags || []).forEach((ct) => {
-        if (!tagsByConversation[ct.conversation_id]) tagsByConversation[ct.conversation_id] = [];
-        if (ct.tags) tagsByConversation[ct.conversation_id].push(ct.tags);
-      });
+    // Pencarian: nama/nomor kontak atau isi pesan terakhir
+    let contactIds = null;
+    if (q) {
+      const { data: cs } = await supabase.from('contacts').select('id')
+        .or(`name.ilike.*${q}*,phone.ilike.*${q}*`).limit(300);
+      contactIds = (cs || []).map((c) => c.id);
     }
 
-    // Ringkasan sudah didenormalisasi di baris conversations -> tanpa query per-chat.
-    const enriched = data.map((conv) => {
-      const lastFromMe = conv.last_from_me ?? null;
-      // Unread (boolean): pesan terakhir dari customer & lebih baru dari last_read_at
-      const unread = lastFromMe === false && !!conv.last_message_at &&
-        (!conv.last_read_at || new Date(conv.last_message_at) > new Date(conv.last_read_at));
-      return {
-        ...conv,
-        lastMessage: conv.last_message || null,
-        lastMessageAt: conv.last_message_at || conv.updated_at,
-        lastFromMe,
-        awaitingSince: conv.awaiting_since || null,
-        tags: tagsByConversation[conv.id] || [],
-        unread,
-      };
+    const build = (contactCols, { head = false, pinnedOnly = false } = {}) => {
+      let sel = convSelect(contactCols);
+      if (tag) sel += ', conversation_tags!inner(tag_id)';
+      let qb = head
+        ? supabase.from('conversations').select(tag ? 'id, conversation_tags!inner(tag_id)' : 'id', { count: 'exact', head: true })
+        : supabase.from('conversations').select(sel);
+      if (agentId) qb = qb.eq('assigned_to', agentId);
+      if (ids) qb = qb.in('id', ids);
+      if (tag) qb = qb.eq('conversation_tags.tag_id', tag);
+      if (status) qb = qb.eq('status', status);
+      if (reply === 'unreplied' || reply === 'unread') qb = qb.eq('last_from_me', false);
+      else if (reply === 'replied') qb = qb.eq('last_from_me', true);
+      if (region === 'bot') qb = qb.eq('bot_state', 'awaiting_location');
+      else if (region === 'unknown') qb = qb.is('region', null);
+      if (q) {
+        const parts = [`last_message.ilike.*${q}*`];
+        if (contactIds?.length) parts.push(`contact_id.in.(${contactIds.join(',')})`);
+        qb = qb.or(parts.join(','));
+      }
+      if (pinnedOnly) {
+        qb = qb.eq('last_from_me', false).not('awaiting_since', 'is', null)
+          .lt('awaiting_since', new Date(Date.now() - KPI_MS).toISOString());
+      }
+      return qb;
+    };
+    // Filter yang tidak bisa dilakukan di database (regional dari kontak, belum dibaca)
+    const post = (rows) => rows.filter((c) => {
+      if (region === 'barat' || region === 'timur') { if (chatRegionOf(c) !== region) return false; }
+      if (region === 'unknown' && chatRegionOf(c)) return false;
+      if (reply === 'unread' && !c.unread) return false;
+      return true;
     });
+    const run = async (fn) => {
+      let r = await fn(CONTACT_COLS);
+      if (r.error) r = await fn(CONTACT_COLS_BASE);
+      if (r.error) throw r.error;
+      return r;
+    };
 
-    res.json(enriched);
+    // Mode lama: seluruh chat (per 1000 baris agar tidak terpotong)
+    if (!limit && !ids) {
+      const all = [];
+      for (let from = 0; ; from += 1000) {
+        const { data } = await run((cols) => build(cols).order('updated_at', { ascending: false }).range(from, from + 999));
+        all.push(...(data || []));
+        if (!data || data.length < 1000) break;
+      }
+      return res.json(post(await enrichConversations(all)));
+    }
+
+    if (ids) {
+      const { data } = await run((cols) => build(cols));
+      return res.json({ items: await enrichConversations(data || []) });
+    }
+
+    // Kursor: updated_at baris terakhir + id baris yang waktunya sama persis
+    // (skip) agar tidak ada chat yang terlewat/terulang di batas halaman.
+    const cursor = req.query.cursor || null;
+    const skip = req.query.skip ? String(req.query.skip).split(',').filter(Boolean).slice(0, 200) : [];
+    const { data } = await run((cols) => {
+      let qb = build(cols).order('updated_at', { ascending: false }).limit(limit);
+      if (cursor) qb = qb.lte('updated_at', cursor);
+      if (skip.length) qb = qb.not('id', 'in', `(${skip.join(',')})`);
+      return qb;
+    });
+    const rows = data || [];
+    const nextCursor = rows.length ? rows[rows.length - 1].updated_at : null;
+    const nextSkip = nextCursor ? rows.filter((r) => r.updated_at === nextCursor).map((r) => r.id) : [];
+    const items = post(await enrichConversations(rows));
+
+    let pinned = [];
+    let total = null;
+    if (!cursor) {
+      const [p, c] = await Promise.all([
+        run((cols) => build(cols, { pinnedOnly: true }).order('awaiting_since', { ascending: true }).limit(200)),
+        build(null, { head: true }),
+      ]);
+      pinned = post(await enrichConversations(p.data || []));
+      total = c.error ? null : c.count;
+    }
+    res.json({ items, pinned, nextCursor, nextSkip: cursor === nextCursor ? [...skip, ...nextSkip] : nextSkip, hasMore: rows.length === limit, total });
   } catch (err) {
     console.error('GET /conversations error:', err);
     res.status(500).json({ error: err.message });
