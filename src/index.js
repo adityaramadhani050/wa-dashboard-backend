@@ -5,7 +5,8 @@ import { Server } from 'socket.io'
 import cors from 'cors'
 import helmet from 'helmet'
 import rateLimit from 'express-rate-limit'
-import { connectToWhatsApp, setIO, getSock, getIsConnected, resetSession, triggerSync, getSyncing, getLatestQr } from './baileys/connection.js'
+import { connectToWhatsApp, setIO, getSock, getIsConnected, resetSession, triggerSync, getSyncing, getLatestQr, flushWaCreds } from './baileys/connection.js'
+import { beginShutdown, waitInflight, releaseWaLock, pruneMessageStore } from './baileys/waGuard.js'
 
 // Allowlist origin CORS. Set CORS_ORIGINS (dipisah koma) di Railway ke domain
 // frontend (mis. https://app.vercel.app). Jika belum diset, izinkan semua agar
@@ -48,6 +49,32 @@ import { verifyTokenString } from './middleware/auth.js'
 // tangkap (mis. "Connection Closed" saat Baileys mengirim retry-request untuk
 // pesan yang gagal didekripsi tepat ketika koneksi sedang tertutup). Node 20
 // meng-crash proses pada unhandledRejection secara default -> cukup di-log.
+// Mati tertib (deploy/restart Railway mengirim SIGTERM): tolak kiriman baru,
+// tunggu kiriman berjalan, simpan kunci enkripsi, tutup WhatsApp rapi, lalu
+// lepas kunci giliran agar server baru langsung tersambung.
+let stopping = false
+async function gracefulShutdown(signal) {
+  if (stopping) return
+  stopping = true
+  console.log(`[Shutdown] ${signal} diterima — mematikan dengan tertib`)
+  const hardExit = setTimeout(() => process.exit(0), 12000)
+  try {
+    beginShutdown()
+    const left = await waitInflight(7000)
+    if (left) console.warn(`[Shutdown] ${left} kiriman belum selesai`)
+    await flushWaCreds()
+    await new Promise((r) => setTimeout(r, 500)) // beri waktu tulis kunci enkripsi
+    try { getSock()?.end?.(undefined) } catch { /* abaikan */ }
+    await releaseWaLock()
+  } catch (e) {
+    console.warn('[Shutdown] gagal:', e?.message || e)
+  }
+  clearTimeout(hardExit)
+  process.exit(0)
+}
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))
+process.on('SIGINT', () => gracefulShutdown('SIGINT'))
+
 process.on('unhandledRejection', (reason) => {
   const msg = reason?.message || reason
   console.error('[unhandledRejection]', msg)
@@ -221,4 +248,6 @@ httpServer.listen(PORT, '0.0.0.0', async () => {
   startAiSalesJob()
   startAiTeamJob().catch(() => {})
   await connectToWhatsApp()
+  // Simpanan pesan untuk kirim-ulang: hapus yang > 7 hari, tiap 12 jam
+  setInterval(() => pruneMessageStore(7).catch(() => {}), 12 * 3600 * 1000)
 })

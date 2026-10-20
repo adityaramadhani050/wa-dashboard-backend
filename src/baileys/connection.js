@@ -18,6 +18,8 @@ import { pauseOnCustomerReply } from '../services/followup.js'
 import { onIncomingForAi } from '../services/aiSales.js'
 import { isTeamPhone, isTeamWaId, handleTeamMessage } from '../services/aiTeam.js'
 import { emitLocal } from '../realtime.js'
+import { acquireWaLock, guardSocket, loadMessage, makeRetryCache } from './waGuard.js'
+import * as waGuard from './waGuard.js'
 import { compressImage, makeThumbnail } from '../utils/media.js'
 import QRCode from 'qrcode'
 import fs from 'fs/promises'
@@ -827,8 +829,17 @@ async function getWaVersion() {
   return cachedWaVersion
 }
 
+const msgRetryCounterCache = makeRetryCache()
+let lockHeld = false
+let saveCredsFn = null
+export async function flushWaCreds() { try { await saveCredsFn?.() } catch { /* abaikan */ } }
+
 export async function connectToWhatsApp() {
+  if (waGuard.shuttingDown) return // server sedang mati: jangan tersambung lagi
+  // Hanya satu server yang boleh tersambung (hindari kunci enkripsi bentrok saat deploy)
+  if (!lockHeld) { await acquireWaLock(); lockHeld = true }
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER)
+  saveCredsFn = saveCreds
   const version = await getWaVersion()
 
   sock = makeWASocket({
@@ -840,20 +851,22 @@ export async function connectToWhatsApp() {
     },
     // printQRInTerminal dihapus (deprecated) — QR ditangani via connection.update
     syncFullHistory: false,
+    // Kirim-ulang otomatis saat penerima gagal membuka enkripsi: pakai isi asli
+    // pesan (teks/media/lokasi). Teks lama yang tidak tersimpan -> isi teks dari DB.
+    msgRetryCounterCache,
     getMessage: async (key) => {
       try {
+        const stored = await loadMessage(key.id)
+        if (stored) return stored
         if (!key.id) return undefined
-        const { data } = await supabase
-          .from('messages')
-          .select('body')
-          .eq('wa_message_id', key.id)
-          .maybeSingle()
-        if (data?.body) return { conversation: data.body }
+        const { data } = await supabase.from('messages').select('body, media_type').eq('wa_message_id', key.id).maybeSingle()
+        if (data?.body && !data.media_type) return { conversation: data.body }
       } catch {}
-      return { conversation: 'message unavailable' }
+      return undefined
     },
   })
 
+  guardSocket(sock)
   sock.ev.on('creds.update', saveCreds)
 
   sock.ev.on('contacts.upsert', (contacts) => {
@@ -903,6 +916,7 @@ export async function connectToWhatsApp() {
     if (connection === 'close') {
       isConnected = false
       ioInstance?.emit('wa_status', { connected: false })
+      if (waGuard.shuttingDown) { console.log('[WA] koneksi ditutup (server mati tertib)'); return }
       const statusCode = lastDisconnect?.error?.output?.statusCode
       const loggedOut = statusCode === DisconnectReason.loggedOut
       console.warn(`[WA] connection close (statusCode=${statusCode}, loggedOut=${loggedOut}, fails=${reconnectFails})`)
