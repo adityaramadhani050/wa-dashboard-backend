@@ -139,7 +139,7 @@ router.get('/', async (req, res) => {
 
     if (ids) {
       const { data } = await run((cols) => build(cols));
-      return res.json({ items: await enrichConversations(data || []) });
+      return res.json({ items: post(await enrichConversations(data || [])) });
     }
 
     // Kursor: updated_at baris terakhir + id baris yang waktunya sama persis
