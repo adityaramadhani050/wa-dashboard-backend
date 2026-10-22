@@ -1,62 +1,12 @@
 // Pengetahuan sales bersama untuk saran balasan AI & AI Sales Agent:
-// katalog produk resmi, contoh balasan sales asli (diutamakan yang closing),
-// template, dan tag percakapan.
+// contoh balasan sales asli (diutamakan yang closing), template, dan tag
+// percakapan. Harga & spesifikasi produk ada di Skill / Playbook.
 import { supabase } from '../db/supabase.js';
-import { tokens } from './aiKnowledge.js';
 
-// Kapasitas dalam watt dari teks ("3 kWp", "3kwp", "3.000 Wp", "1500 watt").
-function capacitiesIn(text) {
-  const out = [];
-  const re = /(\d+(?:[.,]\d+)?)\s*(kwp|kw|wp|watt)\b/gi;
-  let m;
-  while ((m = re.exec(String(text || '')))) {
-    let n = parseFloat(m[1].replace(/\.(?=\d{3}\b)/g, '').replace(',', '.'));
-    if (/^kw/i.test(m[2])) n *= 1000;
-    if (n > 0) out.push(Math.round(n));
-  }
-  return out;
-}
-
-// Katalog hemat token: semua produk ditulis ringkas (nama · kapasitas · harga),
-// spesifikasi lengkap hanya untuk maks. 3 produk yang relevan dengan chat.
-export function catalogFor(products, chatText) {
-  const list = products || [];
-  if (chatText === undefined) {
-    return list.map((p) => {
-      const head = [p.name, p.capacity, p.category].filter(Boolean).join(' · ');
-      return `- ${head}${p.price ? ` — Harga: ${p.price}` : ''}${p.specs ? ` — ${p.specs}` : ''}`;
-    }).join('\n');
-  }
-  const tt = tokens(chatText);
-  const caps = capacitiesIn(chatText);
-  const scored = list.map((p, i) => {
-    let score = 0;
-    for (const w of tokens(`${p.name} ${p.category || ''}`)) if (tt.has(w)) score += 1;
-    const pc = capacitiesIn(p.capacity || p.name);
-    if (caps.length && pc.some((c) => caps.includes(c))) score += 3;
-    return { p, i, score };
-  });
-  const detail = new Set(scored.filter((x) => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 3).map((x) => x.i));
-  return scored.map(({ p, i }) => {
-    const head = [p.name, p.capacity, p.category].filter(Boolean).join(' · ');
-    const price = p.price ? ` — Harga: ${p.price}` : '';
-    return `- ${head}${price}${detail.has(i) && p.specs ? ` — ${p.specs}` : ''}`;
-  }).join('\n');
-}
-
-// opts.chatText: bila diisi, katalog diringkas sesuai isi chat (hemat token).
-export async function buildSalesContext(conversation_id, opts = {}) {
+export async function buildSalesContext(conversation_id) {
   const { data: templates } = await supabase
     .from('message_templates')
     .select('title, body');
-
-  // KNOWLEDGE BASE PRODUK: katalog asli supaya AI tidak mengarang harga/spek
-  const { data: products } = await supabase
-    .from('products')
-    .select('name, category, capacity, price, specs')
-    .eq('active', true)
-    .order('created_at', { ascending: false });
-  const productRef = catalogFor(products, opts.chatText);
 
   // PEMBELAJARAN (in-context learning) — ambil contoh balasan asli sales (from_me=true)
   // dengan PRIORITAS:
@@ -171,5 +121,5 @@ export async function buildSalesContext(conversation_id, opts = {}) {
 
 
   const templateRef = (templates || []).map((t) => `- ${t.title}: ${t.body}`).join('\n');
-  return { productRef, salesStyleRef, learnSourceNote, templateRef, convTags, convTagsText };
+  return { salesStyleRef, learnSourceNote, templateRef, convTags, convTagsText };
 }

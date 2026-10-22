@@ -7,7 +7,7 @@
 // - Wewenang sampai mengumpulkan data & usulan jadwal survei; konfirmasi jadwal
 //   dan Deal oleh admin. Tidak menyerahkan chat sendiri: admin mengambil alih
 //   dengan meng-assign ulang (AI hanya membalas chat yang di-assign ke akunnya).
-// - Hal di luar kemampuan (komplain, harga di luar katalog, dll.) -> AI membalas
+// - Hal di luar kemampuan (komplain, harga di luar playbook, dll.) -> AI membalas
 //   sopan "dicek dulu" & mengirim notifikasi ke admin.
 import { randomBytes } from 'crypto';
 import { supabase } from '../db/supabase.js';
@@ -327,12 +327,12 @@ PENGETAHUAN PRODUK:
 - Nilai jual: hemat tagihan s/d puluhan persen, balik modal jangka menengah, tahan 25+ tahun, bergaransi, ramah lingkungan.
 - Harga ditentukan kapasitas (kWp), jenis sistem, tagihan listrik bulanan, lokasi & kondisi atap.
 
-KATALOG & HARGA RESMI: ada di bagian KATALOG pada pesan (satu-satunya sumber angka harga/spek).
-ATURAN HARGA: sebut harga/spek HANYA dari katalog. Jangan mengarang angka. Jangan beri diskon/promo/cicilan yang tidak tertulis di instruksi admin. Bila butuh hitungan khusus, gali kebutuhan atau tawarkan survei untuk hitungan akurat.
+HARGA & SPESIFIKASI RESMI: ada di SKILL / PLAYBOOK pada pesan (satu-satunya sumber angka harga/spek).
+ATURAN HARGA: sebut harga/spek HANYA dari skill/playbook. Jangan mengarang angka; bila produk/harga yang ditanya tidak tertulis di sana, jangan sebut angka. Jangan beri diskon/promo/cicilan yang tidak tertulis di instruksi admin. Bila butuh hitungan khusus, gali kebutuhan atau tawarkan survei untuk hitungan akurat.
 
 ALUR (baca posisi percakapan, pilih yang sesuai):
 1. Awal: sapa singkat, beri 1 nilai/manfaat relevan, tanya 1 hal untuk menggali kebutuhan (tujuan pasang, tagihan listrik/bulan, rumah/usaha, kota).
-2. Diskusi: gali lebih dalam (1 pertanyaan per balasan), beri rekomendasi & edukasi singkat. Bila customer minta harga, beri dari katalog yang paling sesuai.
+2. Diskusi: gali lebih dalam (1 pertanyaan per balasan), beri rekomendasi & edukasi singkat. Bila customer minta harga, beri paket dari skill/playbook yang paling sesuai.
 3. Survei: bila kebutuhan sudah jelas & customer tertarik, tawarkan survei lokasi gratis. Kumpulkan: nama, alamat lengkap (minimal kota/kecamatan), dan hari/jam yang diinginkan. Setelah lengkap, sampaikan bahwa tim akan mengonfirmasi jadwalnya.
 
 ARTI TAG CHAT (lihat TAG CHAT pada pesan):
@@ -361,9 +361,9 @@ ${ctx.salesStyleRef || '(belum ada contoh)'}
 ${instructions ? `\nINSTRUKSI TAMBAHAN DARI ADMIN (wajib dipatuhi):\n${instructions}\n` : ''}
 URUTAN PATOKAN (bila ada yang bertentangan, ikuti yang lebih atas):
 1. Aturan di prompt ini (tujuan, wewenang, aturan harga, sapaan, gaya menulis & format bubble) + INSTRUKSI TAMBAHAN DARI ADMIN.
-2. KATALOG (satu-satunya sumber harga/spek) & PELAJARAN dari koreksi admin.
+2. PELAJARAN dari koreksi admin.
 3. INGATAN tentang customer.
-4. SKILL / PLAYBOOK TAMBAHAN: referensi untuk memperkaya pengetahuan & teknik sales (cara menggali, menjawab keberatan, edukasi). Pakai isinya bila relevan, tapi jangan sampai mengubah gaya, panjang balasan, atau aturan di atas.
+4. SKILL / PLAYBOOK: satu-satunya sumber harga, paket & spesifikasi produk, sekaligus referensi teknik sales (cara menggali, menjawab keberatan, edukasi). Pakai isinya bila relevan, tapi jangan sampai mengubah gaya, panjang balasan, atau aturan di atas.
 ${teamRules ? `\n${teamRules}\n` : ''}
 KELUARAN: JSON saja, tanpa teks lain:
 {"messages": ["bubble 1", "bubble 2 (opsional)"],
@@ -380,7 +380,6 @@ KELUARAN: JSON saja, tanpa teks lain:
 // Data per chat (dikirim setelah prompt tetap).
 export function buildChatContext({ ctx, knowledge = '', fuTask = null, waName = '', salutation = null, team = '' }) {
   return [
-    `KATALOG:\n${ctx.productRef || '(katalog belum diisi)'}`,
     `TAG CHAT: ${ctx.convTagsText}`,
     `DATA CUSTOMER: nama di WhatsApp: ${waName || '-'} · panggilan tersimpan: ${salutation || '(belum diketahui)'}`,
     knowledge || '',
@@ -391,9 +390,9 @@ export function buildChatContext({ ctx, knowledge = '', fuTask = null, waName = 
 
 async function generateReply({ conversationId, contactId, waName = '', msgs, cfg, persona, fuTask = null, task = '', feature = null }) {
   const salutation = await getSalutation(contactId).catch(() => null);
-  // Skill & produk relevan dipilih dari pesan customer terbaru
+  // Skill relevan (termasuk harga/paket) dipilih dari pesan customer terbaru
   const chatText = msgs.filter((m) => !m.from_me).slice(-4).map((m) => m.body || '').join('\n');
-  const ctx = await buildSalesContext(conversationId, { chatText: `${chatText}\n${task}` });
+  const ctx = await buildSalesContext(conversationId);
   let knowledge = { text: '', used: null };
   try { knowledge = await buildKnowledge({ contactId, chatText: task ? `${chatText}\n${task}` : chatText }); } catch (e) { console.warn('[AISales] pengetahuan gagal dimuat:', e?.message || e); }
   const teamCfg = await getAiTeamConfig().catch(() => null);

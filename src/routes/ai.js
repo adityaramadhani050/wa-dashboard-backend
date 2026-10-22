@@ -3,7 +3,7 @@ import { supabase } from '../db/supabase.js';
 import { STEP_META, OBJECTIONS } from '../services/followup.js';
 import { buildSalesContext } from '../services/salesKnowledge.js';
 import { generate, aiEnabled, isQuotaError } from '../services/llm.js';
-import { getSalutation } from '../services/aiKnowledge.js';
+import { getSalutation, buildKnowledge } from '../services/aiKnowledge.js';
 import { humanizeText, getAiSalesConfig } from '../services/aiSales.js';
 
 // Sapaan & gaya sama dengan AI Sales: pak/bu + nama (dari Ingatan AI), tanpa
@@ -36,8 +36,11 @@ router.post('/suggest', async (req, res) => {
       .limit(20);
     if (msgError) throw msgError;
 
-    const { productRef, salesStyleRef, learnSourceNote, templateRef, convTagsText } = await buildSalesContext(conversation_id);
+    const { salesStyleRef, learnSourceNote, templateRef, convTagsText } = await buildSalesContext(conversation_id);
     const style = await styleFor(conversation_id);
+    // Harga/paket & spesifikasi: dari Skill / Playbook yang relevan dengan pesan customer terbaru
+    const chatText = (messages || []).filter((m) => !m.from_me).slice(0, 4).map((m) => m.body || '').join('\n');
+    const knowledge = await buildKnowledge({ chatText }).catch(() => ({ text: '' }));
 
     const history = (messages || [])
       .reverse()
@@ -53,9 +56,8 @@ PENGETAHUAN PRODUK (gunakan bila relevan):
 - Nilai jual utama: hemat tagihan listrik s/d puluhan persen, balik modal (ROI) jangka menengah, ramah lingkungan, tahan 25+ tahun, ada garansi.
 - Faktor penentuan harga: kapasitas (Watt/kWp), jenis sistem, kebutuhan/tagihan listrik bulanan, lokasi & kondisi atap.
 
-KATALOG PRODUK & HARGA RESMI (SUMBER KEBENARAN — wajib dipakai untuk harga/spek):
-${productRef || '(katalog belum diisi)'}
-ATURAN HARGA: untuk menyebut harga/spesifikasi, gunakan HANYA data katalog di atas. DILARANG mengarang/menebak angka. Kalau produk yang ditanya tidak ada di katalog atau harganya butuh hitungan (tergantung kebutuhan/lokasi), JANGAN sebut angka — arahkan halus untuk digali dulu kebutuhannya atau dicek ke tim. Boleh sebut kisaran HANYA jika tertera di katalog.
+${knowledge.text || 'SKILL / PLAYBOOK: (tidak ada yang relevan dengan pesan ini)'}
+ATURAN HARGA: untuk menyebut harga/paket/spesifikasi, gunakan HANYA data SKILL / PLAYBOOK di atas. DILARANG mengarang/menebak angka. Kalau produk yang ditanya tidak ada di sana atau harganya butuh hitungan (tergantung kebutuhan/lokasi), JANGAN sebut angka — arahkan halus untuk digali dulu kebutuhannya atau dicek ke tim. Boleh sebut kisaran HANYA jika tertera di sana.
 
 PENDEKATAN — CONSULTATIVE SELLING (SANGAT PENTING, jangan dilanggar):
 JANGAN buru-buru menawarkan survei/meeting/telepon. Itu adalah langkah TERAKHIR. Tujuan utamamu lebih dulu: membangun nilai, menggali kebutuhan, dan berdiskusi memberi solusi. Baca dulu posisi percakapan saat ini, lalu pilih tahap yang sesuai:

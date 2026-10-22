@@ -51,7 +51,7 @@ export const DEFAULT_AI_TEAM = {
       topics: [
         'Ketersediaan barang yang kosong/kurang di gudang',
         'Lama pemesanan (inden/proses) dan pengiriman sampai barang siap',
-        'Datasheet/spesifikasi detail produk yang belum ada di katalog',
+        'Datasheet/spesifikasi detail produk yang belum ada di playbook',
       ].join('\n'),
       pics: [],
     },
@@ -458,7 +458,7 @@ async function processTeamBatch(phone, msgs) {
   const fromFactory = req.division === 'procurement' || needOrder;
   const task = `TUGAS SEKARANG: ${req.status === 'answered' ? 'ada RALAT/tambahan info dari tim' : 'tim sudah menjawab'} pertanyaan customer soal "${req.topic || req.customer_question}". Jawaban internal tim (jangan disalin mentah, jangan tambah info yang tidak ada): "${answer}".
 Sampaikan ke customer secara natural sesuai gaya biasa. Sebut cukup "tim kami" bila perlu, jangan sebut nama divisi internal.${fromFactory ? '\nBarang ini DIPESAN LANGSUNG DARI PABRIK: sampaikan sebagai pemesanan dari pabrik dengan SATU estimasi total waktu sampai barang siap (gabungkan lama pesan/proses + pengiriman). JANGAN menyebut supplier, procurement, atau stok gudang kosong. Bila pabrik juga tidak tersedia, sampaikan jujur dengan halus dan tawarkan alternatif tipe/kapasitas lain.' : ''}
-Jangan sebut harga kecuali tertulis di jawaban tim atau di KATALOG. Bila relevan, arahkan ke langkah berikutnya.`;
+Jangan sebut harga kecuali tertulis di jawaban tim atau di SKILL / PLAYBOOK. Bila relevan, arahkan ke langkah berikutnya.`;
   await forwardOrFallback(conv, req, task, `${labelOf(req.division)}: ${answer}`);
 }
 
