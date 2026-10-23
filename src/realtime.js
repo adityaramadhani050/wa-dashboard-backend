@@ -47,6 +47,13 @@ async function assignInfo(convId) {
 export async function emitLocal(channel, data) {
   if (!io) return;
   if (ADMIN_ONLY.has(channel)) { io.to('admins').emit(channel, data); return; }
+  // Permintaan nomor customer: admin + agent yang meminta
+  if (channel === 'number_request') {
+    const rooms = ['admins'];
+    if (data?.agentId != null) rooms.push(`agent:${data.agentId}`);
+    io.to(rooms).emit(channel, data);
+    return;
+  }
   if (!SCOPED.has(channel)) { io.emit(channel, data); return; }
   const convId = convIdOf(data);
   const rooms = new Set(['admins']);

@@ -31,6 +31,7 @@ import aiSalesRouter from './routes/aiSales.js'
 import meRouter from './routes/me.js'
 import broadcastRouter from './routes/broadcast.js'
 import followupRouter from './routes/followup.js'
+import numberRequestsRouter from './routes/numberRequests.js'
 import { requireAuth, requireAdmin } from './middleware/auth.js'
 import { getVapidPublicKey, isWebPushEnabled } from './push/webpush.js'
 import { isPushEnabled } from './push/fcm.js'
@@ -197,6 +198,7 @@ app.use('/api/ai-sales', requireAuth, aiSalesRouter)
 app.use('/api/me', requireAuth, meRouter)
 app.use('/api/broadcast', requireAdmin, broadcastRouter)
 app.use('/api/followup', requireAuth, followupRouter)
+app.use('/api/number-requests', requireAuth, numberRequestsRouter)
 
 app.post('/api/wa/sync', requireAuth, async (req, res) => {
   try {
