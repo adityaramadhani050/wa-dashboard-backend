@@ -546,4 +546,42 @@ router.get('/contacts', async (req, res) => {
   }
 });
 
+// Pesan pertama dari customer per kontak (untuk export percakapan):
+// { [contact_id]: { body, at, media_type } }. Memakai fungsi SQL
+// first_incoming_messages() bila ada (cepat); bila belum dibuat, diambil per chat.
+router.get('/first-messages', async (req, res) => {
+  try {
+    const out = {};
+    const keep = (contactId, m) => {
+      if (!contactId || !m) return;
+      const cur = out[contactId];
+      if (!cur || new Date(m.at) < new Date(cur.at)) out[contactId] = m;
+    };
+    const { data, error } = await supabase.rpc('first_incoming_messages');
+    if (!error) {
+      for (const r of data || []) keep(r.contact_id, { body: r.body, at: r.ts, media_type: r.media_type || null });
+      return res.json(out);
+    }
+    // Cadangan: pesan masuk paling awal per chat (10 permintaan sekaligus)
+    const convs = [];
+    for (let from = 0; ; from += 1000) {
+      const { data: page, error: e } = await supabase.from('conversations').select('id, contact_id').range(from, from + 999);
+      if (e) throw e;
+      convs.push(...(page || []));
+      if (!page || page.length < 1000) break;
+    }
+    for (let i = 0; i < convs.length; i += 10) {
+      await Promise.all(convs.slice(i, i + 10).map(async (c) => {
+        const { data: m } = await supabase.from('messages').select('body, timestamp, media_type')
+          .eq('conversation_id', c.id).eq('from_me', false).order('timestamp', { ascending: true }).limit(1).maybeSingle();
+        if (m) keep(c.contact_id, { body: m.body, at: m.timestamp, media_type: m.media_type || null });
+      }));
+    }
+    res.json(out);
+  } catch (err) {
+    console.error('GET /stats/first-messages error:', err?.message || err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;
